@@ -79,13 +79,13 @@ The web UI supports multiple quotes. The CLI reports the first quote using its d
 
 ## Azure deployment
 
-Pushing to `main` deploys the app to Azure App Service through [.github/workflows/deploy.yml](.github/workflows/deploy.yml). GitHub signs in to Azure with OpenID Connect, so no Azure credentials are stored in GitHub. The workflow reads these non-secret repository variables: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, and `AZURE_WEBAPP_NAME`.
+Pushing to `main` deploys the app to Azure App Service at [https://solar-simulator.azurewebsites.net](https://solar-simulator.azurewebsites.net) through [.github/workflows/deploy.yml](.github/workflows/deploy.yml). GitHub signs in to Azure with OpenID Connect, so no Azure credentials are stored in GitHub. The workflow reads these non-secret repository variables: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, and `AZURE_WEBAPP_NAME`.
 
 The hosted app uses free-tier resources: an App Service F1 Linux plan and Azure Cosmos DB free tier with 1000 RU/s of shared database throughput. It connects to Cosmos DB with its managed identity, and Cosmos DB key authentication is disabled. App Service Authentication allows only the configured Microsoft Entra user.
 
 Octopus credentials are App Service application settings, not GitHub secrets. Set them from your local `.env` with:
 
 ```sh
-az webapp config appsettings set -g rs-solar-finder-rg-swc -n <app-name> \
+az webapp config appsettings set -g rs-solar-finder-rg-swc -n solar-simulator \
   --settings $(grep -E '^OCTOPUS_(API_KEY|ACCOUNT|MPAN|SERIAL)=' .env | xargs) -o none
 ```

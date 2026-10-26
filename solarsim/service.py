@@ -105,7 +105,11 @@ def delete_quote(store: Store, quote_id: str) -> None:
 
 def fetch_consumption(store: Store, days: int) -> dict:
     start, end = _window(days)
-    env = {k: os.environ[f"OCTOPUS_{k.upper()}"] for k in ("base_url", "api_key", "account", "mpan", "serial")}
+    keys = ("base_url", "api_key", "account", "mpan", "serial")
+    missing = [f"OCTOPUS_{k.upper()}" for k in keys if not os.environ.get(f"OCTOPUS_{k.upper()}")]
+    if missing:
+        raise ValueError(f"Octopus settings are not configured: {', '.join(missing)}")
+    env = {k: os.environ[f"OCTOPUS_{k.upper()}"] for k in keys}
     # Meters get replaced; history lives on older serials. Current serial first so it wins on overlaps.
     serials = [env["serial"]] + [s for s in octopus.fetch_meter_serials(
         env["base_url"], env["api_key"], env["account"], env["mpan"]) if s != env["serial"]]
