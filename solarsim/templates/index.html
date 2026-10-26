@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solar + Battery Simulator</title>
+<style>
+  :root { --accent: #5b3ec8; --ok: #1a7f37; --bad: #b42318; --muted: #666; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #f6f5fb; color: #1d1d1f; }
+  header { background: var(--accent); color: #fff; padding: 1rem 2rem; }
+  header h1 { margin: 0; font-size: 1.4rem; }
+  header p { margin: .25rem 0 0; opacity: .85; }
+  .header-nav { margin-top: .7rem; }
+  .header-nav a { color: #fff; font-weight: 600; }
+  main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+  .card { background: #fff; border-radius: 10px; padding: 1.25rem; margin-bottom: 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  h2 { font-size: 1.1rem; margin: 0 0 1rem; }
+  fieldset { border: 1px solid #e3e1ee; border-radius: 8px; padding: .75rem 1rem 1rem; margin: 0; }
+  legend { font-weight: 600; padding: 0 .4rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+  label { display: block; font-size: .85rem; margin-top: .6rem; color: #333; }
+  input, select { width: 100%; padding: .45rem .5rem; border: 1px solid #ccc; border-radius: 6px; font-size: .95rem; }
+  input[type=checkbox] { width: auto; margin-right: .4rem; }
+  .row { display: flex; gap: .75rem; align-items: end; flex-wrap: wrap; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: .65rem 1.3rem; font-size: 1rem; cursor: pointer; }
+  button.secondary { background: #fff; color: var(--accent); border: 1px solid var(--accent); }
+  button:disabled { opacity: .5; cursor: wait; }
+  .muted { color: var(--muted); font-size: .85rem; }
+  .error { color: var(--bad); font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+  th, td { padding: .4rem .5rem; border-bottom: 1px solid #eee; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  th { background: #faf9fe; }
+  .best { background: #f0fdf4; }
+  .headline { font-size: 1.5rem; font-weight: 700; color: var(--ok); }
+  .neg { color: var(--bad); }
+  svg text { font-size: 11px; fill: #555; }
+  .hidden { display: none; }
+  .quotes { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 1rem; }
+  .quote { border: 2px solid #e3e1ee; border-radius: 8px; padding: .75rem 1rem 1rem; position: relative; }
+  .quote .remove { position: absolute; top: .4rem; right: .5rem; background: none; color: var(--bad); padding: .2rem .45rem; font-size: 1.1rem; }
+  .quote input.qname { font-weight: 600; }
+  .quote .save { display: flex; align-items: center; margin-top: .9rem; padding-top: .6rem; border-top: 1px solid #eee; }
+  .quote .saveState { margin-left: auto; font-size: .78rem; }
+  .swatch { display: inline-block; width: .8rem; height: .8rem; border-radius: 2px; margin-right: .35rem; vertical-align: -1px; }
+  .winner { font-weight: 700; color: var(--ok); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Intelligent Octopus Go &rarr; Solar + Battery</h1>
+  <p>Simulate your real half-hourly usage against York solar data and find out when the system pays for itself.</p>
+  <nav class="header-nav"><a href="/guide">What do these values mean?</a></nav>
+</header>
+<main>
+  <section class="card">
+    <h2>Usage data</h2>
+    <div class="row">
+      <div><label for="fetch_days">Days to fetch from Octopus</label><input id="fetch_days" type="number" min="1" max="1095" value="365"></div>
+      <button type="button" class="secondary" id="fetchBtn">Fetch usage data</button>
+      <span id="usageStatus" class="muted" aria-live="polite">Loading&hellip;</span>
+    </div>
+  </section>
+
+  <form id="simForm">
+  <section class="card">
+    <h2>Quotes</h2>
+    <p class="muted">Enter each installer's quote. They share the roof, tariff and finance settings below.</p>
+    <div id="quotes" class="quotes"></div>
+    <p class="row" style="margin-top:1rem">
+      <button type="button" class="secondary" id="addQuote">+ Add another quote</button>
+    </p>
+    <div class="row" style="margin-top:.5rem">
+      <div style="min-width:280px"><label for="savedQuotes">Saved quotes</label><select id="savedQuotes"></select></div>
+      <button type="button" class="secondary" id="loadQuote">Load quote</button>
+      <button type="button" class="secondary" id="deleteQuote">Delete saved quote</button>
+      <span id="savedStatus" class="muted" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Roof, tariff &amp; finance</h2>
+    <div class="grid">
+      <fieldset>
+        <legend>Roof</legend>
+        <label for="orientation">Roof orientation</label>
+        <select id="orientation" name="orientation">
+          {% for key, label in orientations.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+        </select>
+        <div id="eastShareWrap"><label for="east_share_pct">Panels on east face (%)</label><input id="east_share_pct" name="east_share_pct" type="number" min="0" max="100"></div>
+        <label for="tilt">Roof pitch (&deg;)</label><input id="tilt" name="tilt" type="number" min="0" max="90">
+        <label for="performance_ratio">Performance ratio (after losses)</label><input id="performance_ratio" name="performance_ratio" type="number" step="0.01" min="0.5" max="1">
+        <label><input id="typical_year" name="typical_year" type="checkbox">Scale to a typical year (PVGIS long-term average)</label>
+      </fieldset>
+      <fieldset>
+        <legend>Tariff (p/kWh)</legend>
+        <label for="peak_p">Peak rate</label><input id="peak_p" name="peak_p" type="number" step="0.01" min="0">
+        <label for="offpeak_p">Off-peak rate (23:30&ndash;05:30)</label><input id="offpeak_p" name="offpeak_p" type="number" step="0.01" min="0">
+        <label for="export_p">Export rate</label><input id="export_p" name="export_p" type="number" step="0.01" min="0">
+      </fieldset>
+      <fieldset>
+        <legend>Finance</legend>
+        <label for="install_date">Install date</label><input id="install_date" name="install_date" type="date">
+        <label for="price_rise_pct">Energy price rise (% per year)</label><input id="price_rise_pct" name="price_rise_pct" type="number" step="0.1">
+        <label for="degradation_pct">Panel degradation (% per year)</label><input id="degradation_pct" name="degradation_pct" type="number" step="0.1" min="0">
+        <label for="days">Usage history to simulate (days)</label><input id="days" name="days" type="number" min="1" max="1095">
+      </fieldset>
+    </div>
+    <p class="row" style="margin-top:1.25rem">
+      <button type="submit" id="calcBtn">Calculate</button>
+      <span id="calcStatus" class="muted" aria-live="polite"></span>
+    </p>
+  </section>
+  </form>
+
+  <section id="results" class="hidden">
+    <div class="card">
+      <h2>Quote comparison</h2>
+      <p id="headline" class="headline"></p>
+      <p id="dataInfo" class="muted"></p>
+      <label for="compareStrategy">Compare using</label>
+      <select id="compareStrategy" style="max-width:420px"></select>
+      <div style="overflow-x:auto;margin-top:.75rem"><table id="compareTable"></table></div>
+    </div>
+    <div class="card">
+      <h2>Cumulative cash position &ndash; <span id="chartTitle"></span></h2>
+      <svg id="chart" viewBox="0 0 900 300" width="100%" role="img" aria-label="Cumulative savings chart"></svg>
+      <p class="muted">Each line is a quote: cumulative savings minus its cost. Crossing &pound;0 = in profit.</p>
+    </div>
+    <div class="card">
+      <h2>Quote detail</h2>
+      <div class="row">
+        <div><label for="detailQuote">Quote</label><select id="detailQuote"></select></div>
+        <div><label for="monthlyScenario">Option</label><select id="monthlyScenario"></select></div>
+        <div><label for="season">Season (average day)</label>
+          <select id="season"><option>Winter</option><option>Spring</option><option selected>Summer</option><option>Autumn</option></select></div>
+      </div>
+      <h3 style="font-size:1rem;margin:1.25rem 0 .25rem">Average day &ndash; <span id="dayTitle"></span></h3>
+      <svg id="dayChart" viewBox="0 0 900 320" width="100%" role="img" aria-label="Average day power flows chart"></svg>
+      <p class="muted">Average power across every day in the season. The shaded band is the 23:30&ndash;05:30 off-peak window. Battery stored (dashed) uses the right-hand axis.</p>
+      <div style="overflow-x:auto;margin-top:.75rem"><table id="scenarioTable"></table></div>
+      <div style="overflow-x:auto;margin-top:1.25rem"><table id="monthlyTable"></table></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const DEFAULTS = {{ defaults | tojson }};
+const QUOTE_FIELDS = [
+  ["name", "Quote name", "text"], ["solar_kwp", "Solar array (kWp)", "0.01"], ["battery_kwh", "Battery usable (kWh)", "0.1"],
+  ["battery_kw", "Battery power (kW)", "0.1"], ["round_trip_eff", "Round-trip efficiency", "0.01"],
+  ["export_limit_kw", "Export limit (kW)", "0.1"], ["cost_gbp", "Total cost (£)", "1"]];
+const MAX_QUOTES = 6;
+const COLOURS = ["#5b3ec8", "#e8710a", "#1a7f37", "#d01884", "#12b5cb", "#9aa0a6"];
+const form = document.getElementById("simForm");
+const quotesEl = document.getElementById("quotes");
+let lastResult = null;
+
+for (const [k, v] of Object.entries(DEFAULTS)) {
+  const el = form.elements[k];
+  if (!el || el.closest(".quote")) continue;
+  if (el.type === "checkbox") el.checked = !!v; else el.value = v;
+}
+
+function addQuote(values = {}) {
+  const n = quotesEl.children.length;
+  if (n >= MAX_QUOTES) return;
+  const card = document.createElement("div");
+  card.className = "quote";
+  const rm = document.createElement("button");
+  rm.type = "button"; rm.className = "remove"; rm.textContent = "×"; rm.title = "Remove quote";
+  rm.setAttribute("aria-label", "Remove quote");
+  rm.onclick = () => { card.remove(); refreshQuotes(); };
+  card.append(rm);
+  for (const [k, label, step] of QUOTE_FIELDS) {
+    const id = `q${Date.now()}${Math.random().toString(36).slice(2, 6)}_${k}`;
+    const l = document.createElement("label"); l.htmlFor = id; l.textContent = label;
+    const inp = document.createElement("input");
+    inp.id = id; inp.dataset.field = k;
+    if (step === "text") { inp.type = "text"; inp.maxLength = 60; inp.className = "qname"; }
+    else { inp.type = "number"; inp.step = step; inp.min = "0"; }
+    inp.value = values[k] ?? (k === "name" ? `Quote ${n + 1}` : DEFAULTS[k]);
+    inp.addEventListener("input", () => scheduleSave(card));
+    card.append(l, inp);
+  }
+  const save = document.createElement("label");
+  save.className = "save";
+  const box = document.createElement("input");
+  box.type = "checkbox"; box.className = "saveBox"; box.checked = !!values.id;
+  const state = document.createElement("span");
+  state.className = "saveState muted"; state.setAttribute("aria-live", "polite");
+  state.textContent = values.id ? "Saved" : "";
+  save.append(box, "Save this quote", state);
+  box.addEventListener("change", () => box.checked ? saveQuote(card)
+    : (state.textContent = card.dataset.quoteId ? "Changes not saved" : ""));
+  card.append(save);
+  if (values.id) card.dataset.quoteId = values.id;
+  quotesEl.append(card);
+  refreshQuotes();
+}
+
+const quoteValues = card => Object.fromEntries([...card.querySelectorAll("input[data-field]")].map(i => [i.dataset.field, i.value]));
+
+async function saveQuote(card) {
+  const state = card.querySelector(".saveState");
+  state.textContent = "Saving…"; state.className = "saveState muted";
+  try {
+    const doc = await api("/api/quotes", { ...quoteValues(card), id: card.dataset.quoteId });
+    card.dataset.quoteId = doc.id;
+    state.textContent = "Saved";
+    loadSavedList(doc.id);
+  } catch (e) { state.textContent = e.message; state.className = "saveState error"; }
+}
+
+function scheduleSave(card) {
+  if (!card.querySelector(".saveBox").checked) return;
+  clearTimeout(card._saveTimer);
+  card.querySelector(".saveState").textContent = "Unsaved changes…";
+  card._saveTimer = setTimeout(() => saveQuote(card), 800);
+}
+
+let savedQuotes = [];
+async function loadSavedList(selectId) {
+  const sel = document.getElementById("savedQuotes");
+  try {
+    savedQuotes = await api("/api/quotes");
+    sel.replaceChildren();
+    if (!savedQuotes.length) sel.add(new Option("No saved quotes yet", ""));
+    for (const q of savedQuotes) {
+      const when = q.saved_at ? new Date(q.saved_at).toLocaleDateString("en-GB") : "";
+      sel.add(new Option(`${q.name} — ${q.solar_kwp} kWp, ${q.battery_kwh} kWh, ${gbp(q.cost_gbp)} (${when})`, q.id));
+    }
+    if (selectId) sel.value = selectId;
+    document.getElementById("loadQuote").disabled = document.getElementById("deleteQuote").disabled = !savedQuotes.length;
+  } catch (e) { setSavedStatus(e.message, true); }
+}
+
+function setSavedStatus(text, isError) {
+  const st = document.getElementById("savedStatus");
+  st.textContent = text; st.className = isError ? "error" : "muted";
+}
+
+document.getElementById("loadQuote").addEventListener("click", () => {
+  const q = savedQuotes.find(x => x.id === document.getElementById("savedQuotes").value);
+  if (!q) return;
+  if ([...quotesEl.children].some(c => c.dataset.quoteId === q.id)) return setSavedStatus(`"${q.name}" is already on the page`);
+  if (quotesEl.children.length >= MAX_QUOTES) return setSavedStatus(`Remove a quote first (max ${MAX_QUOTES})`, true);
+  // Replace the untouched starter card rather than adding alongside it
+  const only = quotesEl.children.length === 1 ? quotesEl.firstElementChild : null;
+  if (only && !only.dataset.quoteId && !only.querySelector(".saveBox").checked && only._pristine) only.remove();
+  addQuote(q);
+  setSavedStatus(`Loaded "${q.name}"`);
+});
+
+document.getElementById("deleteQuote").addEventListener("click", async () => {
+  const q = savedQuotes.find(x => x.id === document.getElementById("savedQuotes").value);
+  if (!q || !confirm(`Delete saved quote "${q.name}"? This can't be undone.`)) return;
+  try {
+    await api(`/api/quotes/${encodeURIComponent(q.id)}`, null, "DELETE");
+    for (const c of quotesEl.children) if (c.dataset.quoteId === q.id) {
+      delete c.dataset.quoteId;
+      c.querySelector(".saveBox").checked = false;
+      c.querySelector(".saveState").textContent = "";
+    }
+    setSavedStatus(`Deleted "${q.name}"`);
+    loadSavedList();
+  } catch (e) { setSavedStatus(e.message, true); }
+});
+
+function refreshQuotes() {
+  const cards = [...quotesEl.children];
+  cards.forEach((c, i) => { c.style.borderColor = COLOURS[i]; c.querySelector(".remove").hidden = cards.length === 1; });
+  document.getElementById("addQuote").disabled = cards.length >= MAX_QUOTES;
+}
+
+document.getElementById("addQuote").addEventListener("click", () => {
+  const last = quotesEl.lastElementChild;
+  const copy = {};
+  if (last) last.querySelectorAll("input[data-field]").forEach(i => { if (i.dataset.field !== "name") copy[i.dataset.field] = i.value; });
+  addQuote(copy);
+});
+addQuote({ name: "Tesla Powerwall 3" });
+quotesEl.firstElementChild._pristine = true;
+quotesEl.firstElementChild.addEventListener("input", e => { e.currentTarget._pristine = false; }, { once: true });
+
+const orient = document.getElementById("orientation");
+const toggleEast = () => document.getElementById("eastShareWrap").classList.toggle("hidden", orient.value !== "east_west");
+orient.addEventListener("change", toggleEast);
+toggleEast();
+
+const gbp = n => (n < 0 ? "-" : "") + "£" + Math.abs(Math.round(n)).toLocaleString("en-GB");
+const kwh = n => Math.round(n).toLocaleString("en-GB") + " kWh";
+
+async function api(path, body, method) {
+  const res = await fetch(path, { method: method || (body ? "POST" : "GET"), headers: { "Content-Type": "application/json" },
+                                  body: body ? JSON.stringify(body) : undefined });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+loadSavedList();
+
+function showStatus(s) {
+  document.getElementById("usageStatus").textContent = s.days
+    ? `${s.days} days stored (${s.first} to ${s.last})` : "No usage data stored yet";
+}
+
+api("/api/status").then(showStatus).catch(e => document.getElementById("usageStatus").textContent = e.message);
+
+document.getElementById("fetchBtn").addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget, st = document.getElementById("usageStatus");
+  btn.disabled = true; st.textContent = "Fetching from Octopus…"; st.className = "muted";
+  try {
+    const r = await api("/api/usage", { days: +document.getElementById("fetch_days").value });
+    showStatus(r);
+    st.textContent = `Fetched ${r.fetched_days} days. ` + st.textContent;
+  } catch (e) { st.textContent = e.message; st.className = "error"; }
+  finally { btn.disabled = false; }
+});
+
+form.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const btn = document.getElementById("calcBtn"), st = document.getElementById("calcStatus");
+  const body = {};
+  for (const el of form.elements) if (el.name) body[el.name] = el.type === "checkbox" ? el.checked : el.value;
+  body.quotes = [...quotesEl.children].map(quoteValues);
+  btn.disabled = true; st.textContent = `Calculating ${body.quotes.length} quote(s)…`; st.className = "muted";
+  try {
+    lastResult = await api("/api/simulate", body);
+    render(lastResult);
+    st.textContent = "";
+  } catch (e) { st.textContent = e.message; st.className = "error"; }
+  finally { btn.disabled = false; }
+});
+
+function cell(tag, text, cls) { const c = document.createElement(tag); c.textContent = text; if (cls) c.className = cls; return c; }
+
+const pb = s => s.payback[s.payback.length - 1];
+const bestScenario = q => q.scenarios.reduce((a, b) => (b.annual.saving_gbp > a.annual.saving_gbp ? b : a));
+const beText = p => p.breakeven_years ? `${p.breakeven_years.toFixed(1)} yrs — ${p.profit_from}` : "> 25 yrs";
+const net25 = s => pb(s).table[pb(s).table.length - 1].cumulative_gbp;
+
+function render(r) {
+  document.getElementById("results").classList.remove("hidden");
+  const strategies = r.quotes[0].scenarios.map(s => s.scenario);
+  const sel = document.getElementById("compareStrategy"); sel.replaceChildren();
+  sel.add(new Option("Best option for each quote", "best"));
+  strategies.forEach((s, i) => sel.add(new Option(s, i)));
+  sel.onchange = () => renderComparison(r);
+  renderComparison(r);
+
+  const dq = document.getElementById("detailQuote"); dq.replaceChildren();
+  r.quotes.forEach((q, i) => dq.add(new Option(q.name, i)));
+  dq.onchange = () => renderDetail(r.quotes[dq.value]);
+  renderDetail(r.quotes[0]);
+}
+
+function renderComparison(r) {
+  const mode = document.getElementById("compareStrategy").value;
+  const pick = q => mode === "best" ? bestScenario(q) : q.scenarios[+mode];
+  const rows = r.quotes.map(q => ({ q, s: pick(q) }));
+  const ranked = rows.filter(x => pb(x.s).breakeven_years).sort((a, b) => pb(a.s).breakeven_years - pb(b.s).breakeven_years);
+  const fastest = ranked[0], richest = rows.reduce((a, b) => (net25(b.s) > net25(a.s) ? b : a));
+
+  document.getElementById("headline").textContent = !fastest ? "No quote pays back within 25 years"
+    : rows.length === 1 ? `In profit from ${pb(fastest.s).profit_from} (${pb(fastest.s).breakeven_years.toFixed(1)} years) — saving ${gbp(fastest.s.annual.saving_gbp)}/yr`
+    : `${fastest.q.name} pays back first: ${pb(fastest.s).profit_from} (${pb(fastest.s).breakeven_years.toFixed(1)} yrs)` +
+      (richest !== fastest ? ` · ${richest.q.name} earns most over 25 years (${gbp(net25(richest.s))})` : " and earns most over 25 years");
+  document.getElementById("dataInfo").textContent =
+    `Based on usage ${r.data_from} to ${r.data_to} (annualised by month). Solar yield ${r.yield_kwh_per_kwp} kWh/kWp` +
+    (r.solar_scale !== 1 ? ` (scaled ×${r.solar_scale} to a typical year).` : " (measured year).");
+
+  const win = (fn, better) => {
+    const vals = rows.map(x => fn(x)), b = better(...vals);
+    return vals.map(v => rows.length > 1 && isFinite(b) && v === b);
+  };
+  const spec = [
+    ["Solar array", x => `${x.q.solar_kwp} kWp`],
+    ["Battery", x => `${x.q.battery_kwh} kWh / ${x.q.battery_kw} kW`],
+    ["Total cost", x => gbp(x.q.cost_gbp), x => x.q.cost_gbp, Math.min],
+    ["Option used", x => x.s.scenario],
+    ["Annual saving", x => gbp(x.s.annual.saving_gbp), x => x.s.annual.saving_gbp, Math.max],
+    ...rows[0].s.payback.map((p, i) => [`Break-even (${p.price_rise_pct}% price rise/yr)`, x => beText(x.s.payback[i]),
+      x => x.s.payback[i].breakeven_years ?? Infinity, Math.min]),
+    ["25-year net gain", x => gbp(net25(x.s)), x => net25(x.s), Math.max],
+    ["Return on cost over 25 yrs", x => `${Math.round(100 * net25(x.s) / x.q.cost_gbp)}%`, x => net25(x.s) / x.q.cost_gbp, Math.max],
+    ["Annual bill after", x => gbp(x.s.annual.cost_after_gbp), x => x.s.annual.cost_after_gbp, Math.min],
+    ["Solar generated", x => kwh(x.s.annual.solar_generated_kwh)],
+    ["Daytime usage shifted to solar", x => `${Math.round(x.s.annual.peak_usage_shifted_to_solar_pct)}%`,
+      x => x.s.annual.peak_usage_shifted_to_solar_pct, Math.max],
+    ["Peak grid import", x => kwh(x.s.annual.peak_import_kwh), x => x.s.annual.peak_import_kwh, Math.min],
+    ["Exported", x => kwh(x.s.annual.export_kwh)],
+    ["Curtailed", x => kwh(x.s.annual.curtailed_kwh)],
+  ];
+  const t = document.getElementById("compareTable"); t.replaceChildren();
+  const hr = t.insertRow(); hr.append(cell("th", ""));
+  rows.forEach((x, i) => {
+    const th = cell("th", ""); const sw = document.createElement("span");
+    sw.className = "swatch"; sw.style.background = COLOURS[i]; th.append(sw, x.q.name); hr.append(th);
+  });
+  for (const [label, fmt, val, better] of spec) {
+    const flags = val ? win(val, better) : rows.map(() => false);
+    const tr = t.insertRow(); tr.append(cell("td", label));
+    rows.forEach((x, i) => tr.append(cell("td", fmt(x), flags[i] ? "winner" : "")));
+  }
+
+  document.getElementById("chartTitle").textContent = `${pb(rows[0].s).price_rise_pct}% price rise/yr`;
+  drawChart(rows.map((x, i) => ({ name: x.q.name, cost: x.q.cost_gbp, table: pb(x.s).table, colour: COLOURS[i] })));
+}
+
+function renderDetail(q) {
+  const sc = q.scenarios, best = bestScenario(q);
+  const rows = [
+    ["Annual saving", s => gbp(s.annual.saving_gbp)],
+    ...sc[0].payback.map((p, i) => [`Break-even (${p.price_rise_pct}% price rise/yr)`, s => beText(s.payback[i])]),
+    ["25-year net gain", s => gbp(net25(s))],
+    ["Annual bill before → after", s => `${gbp(s.annual.cost_before_gbp)} → ${gbp(s.annual.cost_after_gbp)}`],
+    ["Solar generated", s => kwh(s.annual.solar_generated_kwh)],
+    ["Daytime usage (excl. 23:30–05:30)", s => kwh(s.annual.peak_consumption_kwh)],
+    ["…shifted to solar", s => `${kwh(s.annual.solar_to_peak_usage_kwh)} (${Math.round(s.annual.peak_usage_shifted_to_solar_pct)}%)`],
+    ["Peak grid import", s => kwh(s.annual.peak_import_kwh)],
+    ["Off-peak battery charging", s => kwh(s.annual.grid_battery_charge_kwh)],
+    ["Solar surplus to EV", s => kwh(s.annual.ev_solar_kwh)],
+    ["Exported", s => kwh(s.annual.export_kwh)],
+    ["Curtailed", s => kwh(s.annual.curtailed_kwh)],
+  ];
+  const t = document.getElementById("scenarioTable"); t.replaceChildren();
+  const hr = t.insertRow(); hr.append(cell("th", q.name));
+  sc.forEach(s => hr.append(cell("th", s.scenario, s === best ? "best" : "")));
+  for (const [label, fn] of rows) {
+    const tr = t.insertRow(); tr.append(cell("td", label));
+    sc.forEach(s => tr.append(cell("td", fn(s), s === best ? "best" : "")));
+  }
+
+  const sel = document.getElementById("monthlyScenario"); sel.replaceChildren();
+  sc.forEach((s, i) => { const o = new Option(s.scenario, i); if (s === best) o.selected = true; sel.add(o); });
+  const season = document.getElementById("season");
+  const update = () => { const s = sc[sel.value]; renderMonthly(s); drawDay(s, season.value, q.battery_kwh); };
+  sel.onchange = update; season.onchange = update;
+  update();
+}
+
+const DAY_SERIES = [
+  ["load", "Usage", "#1d1d1f", 2.5], ["pv", "Solar", "#f9ab00", 2.5],
+  ["solar_charge", "Battery charging (solar)", "#1a7f37", 2], ["grid_charge", "Battery charging (grid)", "#12b5cb", 2],
+  ["discharge", "Battery discharging", "#5b3ec8", 2.5], ["import", "Grid import (house/EV)", "#d93025", 1.5],
+  ["export", "Export", "#9aa0a6", 1.5]];
+
+function drawDay(s, season, capacity) {
+  const svg = document.getElementById("dayChart"), NS = "http://www.w3.org/2000/svg";
+  svg.replaceChildren();
+  const data = (s.average_day || {})[season];
+  document.getElementById("dayTitle").textContent = `${season}, ${s.scenario}`;
+  const el = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text) e.textContent = text; svg.append(e); return e; };
+  if (!data || !data.length) { el("text", { x: 20, y: 40 }, "No data for this season"); return; }
+  const W = 900, H = 320, L = 45, R = 230, T = 15, B = 30, PW = W - L - R;
+  const mins = t => +t.slice(0, 2) * 60 + +t.slice(3);
+  const x = t => L + (mins(t) + 15) / 1440 * PW;
+  const kwMax = Math.max(0.5, ...data.flatMap(d => DAY_SERIES.map(([k]) => d[k]))) * 1.08;
+  const y = v => T + (1 - v / kwMax) * (H - T - B);
+  const socMax = Math.max(capacity || 0, ...data.map(d => d.soc), 0.1);
+  const ys = v => T + (1 - v / socMax) * (H - T - B);
+
+  const band = (a, b) => el("rect", { x: L + a / 1440 * PW, y: T, width: (b - a) / 1440 * PW, height: H - T - B, fill: "#eef2ff" });
+  band(0, 330); band(1410, 1440);
+  for (let i = 0; i <= 4; i++) {
+    const v = kwMax * i / 4;
+    el("line", { x1: L, x2: L + PW, y1: y(v), y2: y(v), stroke: "#eee" });
+    el("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end" }, `${v.toFixed(1)}`);
+    el("text", { x: L + PW + 6, y: ys(socMax * i / 4) + 4 }, `${(socMax * i / 4).toFixed(0)}`);
+  }
+  el("text", { x: 4, y: T + 4 }, "kW");
+  el("text", { x: L + PW + 6, y: T - 4 }, "kWh");
+  for (let h = 0; h <= 24; h += 3) el("text", { x: L + h / 24 * PW, y: H - 8, "text-anchor": "middle" }, `${String(h).padStart(2, "0")}:00`);
+
+  const line = (pts, attrs) => el("polyline", { points: pts.join(" "), fill: "none", ...attrs });
+  DAY_SERIES.forEach(([k, , colour, w]) => {
+    if (!data.some(d => d[k] > 0.005)) return;
+    line(data.map(d => `${x(d.t)},${y(d[k])}`), { stroke: colour, "stroke-width": w });
+  });
+  line(data.map(d => `${x(d.t)},${ys(d.soc)}`), { stroke: "#5b3ec8", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
+
+  [...DAY_SERIES.map(([, label, colour]) => [label, colour, false]), ["Battery stored (kWh)", "#5b3ec8", true]]
+    .forEach(([label, colour, dashed], i) => {
+      const ly = T + 6 + i * 20;
+      el("line", { x1: W - R + 45, x2: W - R + 65, y1: ly, y2: ly, stroke: colour, "stroke-width": 3, ...(dashed ? { "stroke-dasharray": "4 3" } : {}) });
+      el("text", { x: W - R + 72, y: ly + 4 }, label);
+    });
+}
+
+function renderMonthly(s) {
+  const cols = [["ym", "Month"], ["load", "Usage kWh"], ["pv", "Solar kWh"], ["import", "Import kWh"], ["export", "Export kWh"],
+                ["ev_solar", "Solar→EV kWh"], ["cost_before", "Cost before"], ["cost_after", "Cost after"], ["saving", "Saving"]];
+  const t = document.getElementById("monthlyTable"); t.replaceChildren();
+  const hr = t.insertRow(); cols.forEach(([, h]) => hr.append(cell("th", h)));
+  for (const m of s.monthly) {
+    const tr = t.insertRow();
+    cols.forEach(([k]) => {
+      const v = m[k];
+      tr.append(cell("td", k === "ym" ? v : k.startsWith("cost") || k === "saving" ? gbp(v) : Math.round(v).toLocaleString("en-GB"),
+                     typeof v === "number" && v < 0 ? "neg" : ""));
+    });
+  }
+}
+
+function drawChart(series) {
+  const svg = document.getElementById("chart"), NS = "http://www.w3.org/2000/svg";
+  svg.replaceChildren();
+  const W = 900, H = 300, L = 70, R = 190, T = 15, B = 30;
+  const all = series.flatMap(s => s.table.map(p => p.cumulative_gbp).concat(-s.cost)).concat(0);
+  const min = Math.min(...all), max = Math.max(...all), years = series[0].table.length;
+  const x = y => L + (y / years) * (W - L - R), y = v => T + (max - v) / (max - min) * (H - T - B);
+  const el = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text) e.textContent = text; svg.append(e); return e; };
+  for (let i = 0; i <= 4; i++) {
+    const v = min + (max - min) * i / 4;
+    el("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: "#eee" });
+    if (Math.abs(y(v) - y(0)) > 14) el("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end" }, gbp(v));
+  }
+  el("line", { x1: L, x2: W - R, y1: y(0), y2: y(0), stroke: "#333", "stroke-width": 1.5 });
+  el("text", { x: L - 6, y: y(0) + 4, "text-anchor": "end", "font-weight": "bold" }, "£0");
+  for (let yr = 0; yr <= years; yr += 5) el("text", { x: x(yr), y: H - 8, "text-anchor": "middle" }, `Yr ${yr}`);
+  series.forEach((s, i) => {
+    const pts = [[0, -s.cost], ...s.table.map(p => [p.year, p.cumulative_gbp])].map(([a, b]) => `${x(a)},${y(b)}`).join(" ");
+    el("polyline", { points: pts, fill: "none", stroke: s.colour, "stroke-width": 2.5 });
+    el("rect", { x: W - R + 12, y: T + i * 22, width: 12, height: 12, fill: s.colour });
+    el("text", { x: W - R + 30, y: T + i * 22 + 10 }, s.name.length > 26 ? s.name.slice(0, 25) + "…" : s.name);
+  });
+}
+</script>
+</body>
+</html>

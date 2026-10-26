@@ -1,0 +1,19 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Local environments and editor settings
+.venv/
+.vscode/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+
+# Local OS and key files
+.DS_Store
+*.pem
+*.key
+*.p12
+*.pfx

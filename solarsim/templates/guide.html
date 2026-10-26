@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guide to the simulator values</title>
+<style>
+  :root { --accent: #5b3ec8; --muted: #666; --line: #e3e1ee; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f6f5fb; color: #1d1d1f; font-family: system-ui, -apple-system, sans-serif; line-height: 1.55; }
+  header { background: var(--accent); color: #fff; padding: 1rem 2rem; }
+  header h1 { margin: 0; font-size: 1.4rem; }
+  header p { margin: .25rem 0 0; opacity: .88; }
+  header a { color: #fff; font-weight: 600; }
+  main { max-width: 1000px; margin: 0 auto; padding: 1.5rem; }
+  section { padding: 1.25rem 0; border-bottom: 1px solid var(--line); }
+  section:first-child { padding-top: 0; }
+  h2 { margin: 0 0 .7rem; font-size: 1.15rem; }
+  h3 { margin: 1rem 0 .25rem; font-size: 1rem; }
+  p { margin: .35rem 0 .7rem; }
+  dl { display: grid; grid-template-columns: minmax(190px, 1fr) 3fr; gap: .55rem 1rem; margin: .5rem 0 0; }
+  dt { font-weight: 650; }
+  dd { margin: 0; color: #3f3f46; }
+  .note { border-left: 3px solid var(--accent); padding: .65rem .9rem; background: #fff; margin-top: .8rem; }
+  @media (max-width: 620px) {
+    header { padding: 1rem; }
+    main { padding: 1rem; }
+    dl { grid-template-columns: 1fr; gap: .15rem; }
+    dd { margin-bottom: .6rem; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Guide to the simulator values</h1>
+  <p><a href="/">Back to the simulator</a></p>
+</header>
+<main>
+  <section>
+    <h2>Usage data</h2>
+    <dl>
+      <dt>Days to fetch</dt><dd>How far back to request half-hourly electricity readings from Octopus. The app checks import meters on the MPAN, including replaced meters, and combines overlapping readings without duplicates.</dd>
+      <dt>Usage history to simulate</dt><dd>How many recent days of stored readings the comparison uses. Fetch more data first if the requested period is not stored.</dd>
+      <dt>Half-hourly usage</dt><dd>Electricity consumed in each 30-minute interval, measured in kWh. The model separates the 23:30–05:30 off-peak window from the rest of the day.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>Quote values</h2>
+    <dl>
+      <dt>Quote name</dt><dd>A label for identifying an installer or system in the comparison and saved-quote list.</dd>
+      <dt>Solar array (kWp)</dt><dd>The panels' rated peak power under standard test conditions. It is a power rating, not the amount of electricity generated each day.</dd>
+      <dt>Battery usable (kWh)</dt><dd>How much stored energy can be used. A larger capacity can cover longer periods, but is only valuable if there is enough surplus to charge it and later demand to discharge it.</dd>
+      <dt>Battery power (kW)</dt><dd>The maximum rate the battery can charge or discharge. The simulator applies this limit in every half-hour.</dd>
+      <dt>Round-trip efficiency</dt><dd>The share of charging energy returned when the battery is discharged. For example, 0.89 means about 89% comes back; the rest is lost during charging and discharging.</dd>
+      <dt>Export limit (kW)</dt><dd>The maximum rate surplus electricity can be sent to the grid. Generation above house use, battery charging and this limit is marked as curtailed.</dd>
+      <dt>Total cost (£)</dt><dd>The installed quote amount used to calculate how long savings take to recover the upfront cost. Include the items you want compared, such as panels, battery and installation.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>Roof, tariff and finance</h2>
+    <dl>
+      <dt>Roof orientation</dt><dd>East / West models panels split between east- and west-facing roof planes. The east-share field sets that split; the remainder is assigned west. North / South means the modelled panels face south.</dd>
+      <dt>Roof pitch</dt><dd>The panel tilt from horizontal in degrees. It changes the solar irradiance data used for the estimate.</dd>
+      <dt>Performance ratio</dt><dd>A multiplier for real-world system losses such as inverter, wiring, temperature and shading. 0.85 represents 85% of the modelled plane-of-array irradiation reaching usable AC generation.</dd>
+      <dt>Typical year</dt><dd>When checked, scales the measured solar profile to PVGIS's long-term average yield for York, the selected orientation and pitch. It adjusts the solar amount, not the half-hourly shape.</dd>
+      <dt>Peak rate</dt><dd>Electricity import price outside 23:30–05:30, in pence per kWh.</dd>
+      <dt>Off-peak rate</dt><dd>Import price from 23:30 to 05:30, in pence per kWh. In the model, electric-car charging remains on this cheap grid rate unless summer surplus solar is assigned to EV charging.</dd>
+      <dt>Export rate</dt><dd>Payment received for each exported kWh, in pence. The model subtracts export earnings from the estimated bill.</dd>
+      <dt>Install date</dt><dd>The date used to turn a payback duration into a calendar month and year. If blank, today is used.</dd>
+      <dt>Energy price rise</dt><dd>The assumed yearly increase in energy prices. The app shows payback with flat prices and with this selected increase.</dd>
+      <dt>Panel degradation</dt><dd>The assumed annual reduction in panel output, applied to later-year savings in the payback estimate.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>Comparison results</h2>
+    <dl>
+      <dt>Annual saving</dt><dd>Estimated current annual electricity cost minus the modelled annual cost after solar, battery use and export income.</dd>
+      <dt>Break-even</dt><dd>The estimated time for accumulated savings to recover the quote cost. “In profit from” is the corresponding month and year. If it says more than 25 years, the model did not recover the cost within its 25-year horizon.</dd>
+      <dt>25-year net gain</dt><dd>The cumulative estimated savings over 25 years minus the upfront quote cost. It uses the selected price-rise assumption and panel degradation.</dd>
+      <dt>Return on cost over 25 years</dt><dd>25-year net gain divided by the quote cost, expressed as a percentage. It is a simple modelled return, not an investment guarantee.</dd>
+      <dt>Annual bill after</dt><dd>Estimated annual import charges minus export payments under the simulated setup. A negative amount means export payments exceed modelled import charges.</dd>
+      <dt>Solar generated</dt><dd>Estimated annual AC solar electricity after the performance-ratio losses.</dd>
+      <dt>Daytime usage shifted to solar</dt><dd>The percentage and kWh of usage outside 23:30–05:30 covered directly by solar or by solar-origin battery energy. Grid-charged battery energy is not counted as solar.</dd>
+      <dt>Peak grid import</dt><dd>Electricity still imported at the peak rate after direct solar and battery discharge.</dd>
+      <dt>Off-peak battery charging</dt><dd>Electricity bought from the grid to charge the battery during the cheap window. This is shown separately from car charging.</dd>
+      <dt>Solar surplus to EV</dt><dd>Surplus solar assigned to electric-car charging in the summer-EV scenario, limited by estimated overnight EV demand and charging power.</dd>
+      <dt>Exported</dt><dd>Surplus solar sold to the grid, up to the configured export limit.</dd>
+      <dt>Curtailed</dt><dd>Potential solar generation the model cannot use or export, for example because the battery is full and the export limit is reached.</dd>
+      <dt>Winner highlight</dt><dd>Highlights the lowest cost or payback time, or the highest savings, for that comparison row. It does not mean every aspect of that quote is best.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>Average-day chart</h2>
+    <dl>
+      <dt>Usage and solar</dt><dd>Average power for each half-hour across the selected season, in kW. Solar is generated power; usage is household electricity demand.</dd>
+      <dt>Battery charging (solar)</dt><dd>Average solar power sent into the battery.</dd>
+      <dt>Battery charging (grid)</dt><dd>Average power bought in the off-peak window to charge the battery.</dd>
+      <dt>Battery discharging</dt><dd>Average power delivered from the battery to meet household demand.</dd>
+      <dt>Grid import (house/EV)</dt><dd>Average power still imported after solar and battery dispatch. In the summer-EV scenario, this includes the modelled reduction in overnight EV charging from solar supplied to the car earlier.</dd>
+      <dt>Export</dt><dd>Average power sent to the grid, limited by the export setting.</dd>
+      <dt>Battery stored</dt><dd>The dashed line uses the right-hand axis and shows average state of charge in kWh at each half-hour.</dd>
+      <dt>Shaded band</dt><dd>The off-peak window from 23:30 to 05:30. The model avoids discharging the battery during this cheap-rate period.</dd>
+      <dt>Seasons</dt><dd>Winter is December–February, spring March–May, summer June–August, and autumn September–November. The chart averages available days in each season from the selected usage period.</dd>
+    </dl>
+  </section>
+
+  <p class="note"><strong>Important:</strong> results are estimates based on available meter readings, weather data, tariff inputs and simplified battery dispatch. In particular, overnight grid charging plans against the following day's recorded demand and solar, effectively giving the model better forecasts than a real system. Actual performance, tariffs, export limits and installation costs may differ.</p>
+</main>
+</body>
+</html>
