@@ -15,8 +15,8 @@ def _mins(hhmm: str) -> int:
 
 @dataclass
 class Tariff:
-    peak_p: float = 28.85       # Intelligent Octopus Go, region F (inc VAT)
-    offpeak_p: float = 6.90
+    peak_p: float = 34.96       # Intelligent Octopus Go, region F (inc VAT)
+    offpeak_p: float = 6.60
     export_p: float = 12.0      # Outgoing Octopus
     offpeak_start: str = "23:30"
     offpeak_end: str = "05:30"

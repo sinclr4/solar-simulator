@@ -23,7 +23,7 @@ class Inputs:
     days: int = 365
     solar_kwp: float = 7.76
     orientation: str = "east_west"
-    east_share_pct: float = 50
+    east_share_pct: float = 60
     tilt: float = 35
     performance_ratio: float = 0.85
     typical_year: bool = False
@@ -32,8 +32,8 @@ class Inputs:
     round_trip_eff: float = 0.89
     export_limit_kw: float = 5.0
     cost_gbp: float = 13699
-    peak_p: float = 28.85
-    offpeak_p: float = 6.90
+    peak_p: float = 34.96
+    offpeak_p: float = 6.60
     export_p: float = 12.0
     price_rise_pct: float = 3.0
     degradation_pct: float = 0.5
