@@ -7,7 +7,7 @@ from dataclasses import fields
 from dotenv import load_dotenv
 
 from . import service
-from .store import Store
+from .store import Database
 
 
 def main() -> None:
@@ -30,7 +30,7 @@ def main() -> None:
         from .web import main as web_main
         web_main()
         return
-    store = Store(os.environ["COSMOS_ENDPOINT"], os.environ.get("COSMOS_DATABASE", "solarsim"))
+    store = Database(os.environ["COSMOS_ENDPOINT"], os.environ.get("COSMOS_DATABASE", "solarsim")).for_user(service.LOCAL_USER)
     if args.cmd == "fetch-usage":
         print(service.fetch_consumption(store, args.days))
         return

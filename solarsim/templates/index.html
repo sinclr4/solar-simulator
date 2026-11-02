@@ -51,12 +51,25 @@
 <header>
   <h1>Intelligent Octopus Go &rarr; Solar + Battery</h1>
   <p>Simulate your real half-hourly usage against York solar data and find out when the system pays for itself.</p>
-  <nav class="header-nav"><a href="/guide">What do these values mean?</a></nav>
+  <nav class="header-nav"><a href="/guide">What do these values mean?</a>
+    <span id="whoami" style="margin-left:1rem;opacity:.85"></span> <a id="signOut" href="/.auth/logout?post_logout_redirect_uri=/" class="hidden">Sign out</a></nav>
 </header>
 <main>
   <section class="card">
     <h2>Usage data</h2>
-    <div class="row">
+    <div id="octopusSetup" class="hidden">
+      <p>Connect your Octopus Energy account once and it is remembered for next time. Your API key is stored encrypted and only used to fetch your own usage. Find it under
+        <em>Account &rarr; Personal details &rarr; API access</em> in your Octopus dashboard.</p>
+      <div class="row">
+        <div><label for="oct_account">Account number</label><input id="oct_account" placeholder="A-1234ABCD" autocomplete="off"></div>
+        <div><label for="oct_key">API key</label><input id="oct_key" type="password" placeholder="sk_live_&hellip;" autocomplete="off"></div>
+        <button type="button" id="octSave">Connect &amp; save</button>
+      </div>
+      <p id="octMsg" class="muted" aria-live="polite"></p>
+    </div>
+    <p id="octopusConnected" class="hidden muted">Connected to Octopus account <strong id="octAcct"></strong> (meter ending <span id="octMpan"></span>).
+      <button type="button" class="secondary" id="octDisconnect" style="padding:.25rem .7rem;font-size:.85rem">Disconnect</button></p>
+    <div class="row" id="fetchRow">
       <div><label for="fetch_days">Days to fetch from Octopus</label><input id="fetch_days" type="number" min="1" max="1095" value="365"></div>
       <button type="button" class="secondary" id="fetchBtn">Fetch usage data</button>
       <span id="usageStatus" class="muted" aria-live="polite">Loading&hellip;</span>
@@ -308,7 +321,7 @@ const gbp = n => (n < 0 ? "-" : "") + "£" + Math.abs(Math.round(n)).toLocaleStr
 const kwh = n => Math.round(n).toLocaleString("en-GB") + " kWh";
 
 async function api(path, body, method) {
-  const res = await fetch(path, { method: method || (body ? "POST" : "GET"), headers: { "Content-Type": "application/json" },
+  const res = await fetch(path, { method: method || (body ? "POST" : "GET"), headers: { "Content-Type": "application/json", "X-Solar-Client": "1" },
                                   body: body ? JSON.stringify(body) : undefined });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || res.statusText);
@@ -316,6 +329,39 @@ async function api(path, body, method) {
 }
 
 loadSavedList();
+
+function showOctopus(o) {
+  document.getElementById("octopusSetup").classList.toggle("hidden", o.connected);
+  document.getElementById("octopusConnected").classList.toggle("hidden", !o.connected);
+  document.getElementById("fetchRow").classList.toggle("hidden", !o.connected);
+  if (o.connected) {
+    document.getElementById("octAcct").textContent = o.account;
+    document.getElementById("octMpan").textContent = "…" + o.mpan_ending;
+  }
+}
+
+api("/api/octopus").then(showOctopus).catch(() => {});
+api("/api/me").then(me => {
+  document.getElementById("whoami").textContent = me.local ? "Local mode" : `Signed in as ${me.name}`;
+  document.getElementById("signOut").classList.toggle("hidden", me.local);
+}).catch(() => {});
+
+document.getElementById("octSave").addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget, msg = document.getElementById("octMsg");
+  btn.disabled = true; msg.textContent = "Checking with Octopus…"; msg.className = "muted";
+  try {
+    showOctopus(await api("/api/octopus", {
+      account: document.getElementById("oct_account").value, api_key: document.getElementById("oct_key").value }));
+    document.getElementById("oct_key").value = "";
+    msg.textContent = "";
+  } catch (e) { msg.textContent = e.message; msg.className = "error"; }
+  finally { btn.disabled = false; }
+});
+
+document.getElementById("octDisconnect").addEventListener("click", async () => {
+  if (!confirm("Remove your saved Octopus details? Your stored usage data is kept.")) return;
+  showOctopus(await api("/api/octopus", null, "DELETE"));
+});
 
 function showStatus(s) {
   document.getElementById("usageStatus").textContent = s.days

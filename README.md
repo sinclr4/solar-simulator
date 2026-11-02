@@ -130,7 +130,7 @@ Create your local environment file from the example:
 cp .env.example .env
 ```
 
-Edit `.env` and set `OCTOPUS_API_KEY`, `OCTOPUS_ACCOUNT`, `OCTOPUS_MPAN`, and `OCTOPUS_SERIAL`. Set `COSMOS_ENDPOINT` and `COSMOS_DATABASE` for your Cosmos DB account and database. Do not commit `.env`; it is gitignored.
+Edit `.env` and set `COSMOS_ENDPOINT` and `COSMOS_DATABASE` for your Cosmos DB account and database. Do not commit `.env`; it is gitignored. Octopus details are entered in the web page and saved encrypted (see "Accounts and privacy"). When running locally you are the user `local`, and a generated encryption key is kept in `~/.solarsim/credentials.key`. For the command line you can still set `OCTOPUS_API_KEY`, `OCTOPUS_ACCOUNT` and `OCTOPUS_MPAN` in `.env`.
 
 Sign in to Azure CLI using the identity granted Cosmos DB data access:
 
@@ -156,7 +156,7 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The app binds to localhost 
 PORT=8001 .venv/bin/python -m solarsim web
 ```
 
-On the page, use **Fetch usage data** to retrieve more Octopus history, adjust the shared roof/tariff assumptions and quote-specific equipment/costs, then press **Calculate**. The first fetch can take a little while. The app checks the MPAN's import meters so it can include historic readings from replaced meters.
+On the page, first connect your Octopus account (account number and API key, once), then use **Fetch usage data** to retrieve more Octopus history, adjust the shared roof/tariff assumptions and quote-specific equipment/costs, then press **Calculate**. The first fetch can take a little while. The app checks the MPAN's import meters so it can include historic readings from replaced meters.
 
 ## Command line
 
@@ -187,11 +187,15 @@ The web UI supports multiple quotes. The CLI reports the first quote using its d
 
 Pushing to `main` deploys the app to Azure App Service at [https://solar-simulator.azurewebsites.net](https://solar-simulator.azurewebsites.net) through [.github/workflows/deploy.yml](.github/workflows/deploy.yml). GitHub signs in to Azure with OpenID Connect, so no Azure credentials are stored in GitHub. The workflow reads these non-secret repository variables: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, and `AZURE_WEBAPP_NAME`.
 
-The hosted app uses free-tier resources: an App Service F1 Linux plan and Azure Cosmos DB free tier with 1000 RU/s of shared database throughput. It connects to Cosmos DB with its managed identity, and Cosmos DB key authentication is disabled. App Service Authentication allows only the configured Microsoft Entra user.
+The hosted app uses free-tier resources: an App Service F1 Linux plan and Azure Cosmos DB free tier with 1000 RU/s of shared database throughput. It connects to Cosmos DB with its managed identity, and Cosmos DB key authentication is disabled. App Service Authentication requires every visitor to sign in with a Microsoft account (work, school or personal).
 
-Octopus credentials are App Service application settings, not GitHub secrets. Set them from your local `.env` with:
+The app needs these App Service application settings: `COSMOS_ENDPOINT`, `COSMOS_DATABASE`, and `CREDENTIALS_KEY`, the encryption key for saved Octopus details. Generate the key once with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` and keep a copy somewhere safe: if it is lost or changed, users must re-enter their Octopus details. Optionally set `LEGACY_DATA_OWNER_ID` (and `LEGACY_DATA_OWNER`, an email) so data saved before accounts existed is claimed by that one user the first time they sign in.
 
-```sh
-az webapp config appsettings set -g rs-solar-finder-rg-swc -n solar-simulator \
-  --settings $(grep -E '^OCTOPUS_(API_KEY|ACCOUNT|MPAN|SERIAL)=' .env | xargs) -o none
-```
+## Accounts and privacy
+
+- Anyone with a Microsoft account can sign in. Each person connects their own Octopus account in the page: they enter the account number and API key once and the app finds their meter itself. The Octopus address is fixed in code and cannot be supplied by users.
+- The API key is encrypted with `CREDENTIALS_KEY` before it is stored, is never sent back to the browser, and can be removed with **Disconnect**.
+- Every stored usage day, saved quote, simulation result and setting carries the signed-in user's ID, and every query filters on it, so users cannot see each other's data. Only the public York weather data is shared. This is covered by `tests/test_store.py`.
+- Sign-in is handled by App Service Authentication. The app trusts the user ID header it sets, and refuses requests without it when running in Azure. Changing requests must carry an `X-Solar-Client` header, which stops other websites acting on a signed-in user's behalf.
+
+Run the tests with `.venv/bin/python -m pytest tests`.

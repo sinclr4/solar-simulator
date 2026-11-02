@@ -6,3 +6,4 @@ azure-identity>=1.17
 python-dotenv>=1.0
 flask>=3.0
 gunicorn>=22.0
+cryptography>=42

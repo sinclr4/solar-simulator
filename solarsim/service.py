@@ -8,10 +8,11 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 from dateutil.relativedelta import relativedelta
 
-from . import octopus, weather
+from . import credentials, octopus, weather
 from .model import LOCAL_TZ, SLOT_H, Strategy, System, Tariff, annualise, build_frame, dispatch, payback, simulate
 from .store import Store
 
+LOCAL_USER = "local"
 ORIENTATIONS = {"east_west": "East / West", "south": "North / South (panels on south face)"}
 QUOTE_FIELDS = ("name", "solar_kwp", "battery_kwh", "battery_kw", "round_trip_eff", "export_limit_kw", "cost_gbp")
 MAX_QUOTES = 6
@@ -113,18 +114,49 @@ def delete_quote(store: Store, quote_id: str) -> None:
     store.delete("quotes", str(uuid.UUID(quote_id)))
 
 
+OCTOPUS_DOC = "octopus"
+
+
+def _octopus_details(store: Store) -> dict | None:
+    doc = store.get("settings", OCTOPUS_DOC)
+    if doc:
+        return {"api_key": credentials.decrypt(doc["api_key_enc"]), "account": doc["account"], "mpan": doc["mpan"]}
+    # A developer running locally may still keep their details in .env; never done for signed-in web users
+    env = {k: os.environ.get(f"OCTOPUS_{k.upper()}") for k in ("api_key", "account", "mpan")}
+    if store.user_id == LOCAL_USER and all(env.values()):
+        return env
+    return None
+
+
+def octopus_status(store: Store) -> dict:
+    doc = store.get("settings", OCTOPUS_DOC)
+    if doc:
+        return {"connected": True, "account": doc["account"], "mpan_ending": doc["mpan"][-4:]}
+    return {"connected": False}
+
+
+def save_octopus(store: Store, data: dict) -> dict:
+    api_key = credentials.clean_api_key(data.get("api_key"))
+    account = credentials.clean_account(data.get("account"))
+    mpan = octopus.discover(api_key, account)
+    store.upsert("settings", [{"id": OCTOPUS_DOC, "account": account, "mpan": mpan,
+                               "api_key_enc": credentials.encrypt(api_key),
+                               "saved_at": datetime.now(timezone.utc).isoformat()}])
+    return octopus_status(store)
+
+
+def delete_octopus(store: Store) -> None:
+    store.delete("settings", OCTOPUS_DOC)
+
+
 def fetch_consumption(store: Store, days: int) -> dict:
     start, end = _window(days)
-    keys = ("base_url", "api_key", "account", "mpan", "serial")
-    missing = [f"OCTOPUS_{k.upper()}" for k in keys if not os.environ.get(f"OCTOPUS_{k.upper()}")]
-    if missing:
-        raise ValueError(f"Octopus settings are not configured: {', '.join(missing)}")
-    env = {k: os.environ[f"OCTOPUS_{k.upper()}"] for k in keys}
-    # Meters get replaced; history lives on older serials. Current serial first so it wins on overlaps.
-    serials = [env["serial"]] + [s for s in octopus.fetch_meter_serials(
-        env["base_url"], env["api_key"], env["account"], env["mpan"]) if s != env["serial"]]
+    env = _octopus_details(store)
+    if not env:
+        raise ValueError("Connect your Octopus account first")
+    serials = octopus.fetch_meter_serials(env["api_key"], env["account"], env["mpan"])
     rows = [r for s in serials for r in octopus.fetch_consumption(
-        env["base_url"], env["api_key"], env["mpan"], s, start.isoformat(), end.isoformat())]
+        env["api_key"], env["mpan"], s, start.isoformat(), end.isoformat())]
     if not rows:
         return {"fetched_days": 0, **data_status(store)}
     cons = pd.DataFrame(rows)
