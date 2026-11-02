@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 from dateutil.relativedelta import relativedelta
@@ -20,7 +20,7 @@ STRATEGIES = [
     Strategy("Solar + battery + off-peak grid charging", grid_charge=True),
     Strategy("Grid charging + summer surplus to EV", grid_charge=True, ev_surplus=True),
 ]
-TYPICAL_DAYS = 28
+TYPICAL_DAYS = 56
 FORECAST_LABELS = ("Yesterday", "Today", "Tomorrow")
 FORECAST_FLOWS = ("load", "pv", "solar_charge", "grid_charge", "discharge", "import", "export", "ev_solar")
 FORECAST_TOTALS = ("load", "pv", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving")
@@ -234,7 +234,7 @@ def _run_quote(store: Store, unit: pd.DataFrame, inp: Inputs, tariff: Tariff, ru
 
 
 def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple[pd.Series, list[str]]:
-    """Actual stored usage for each day where available, otherwise the average of the last stored days."""
+    """Actual stored usage for each day where available, otherwise the average for the same weekday over the last 8 weeks."""
     first = days[0]
     docs = store.by_date("consumption", (first - timedelta(days=TYPICAL_DAYS)).isoformat(),
                          (days[-1] + timedelta(days=1)).isoformat())
@@ -245,15 +245,24 @@ def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple
     actual_days = {d["date"] for d in docs if d["date"] >= first.isoformat() and len(d["slots"]) >= 46}
 
     past = pd.Series({pd.Timestamp(s["start"]): s["kwh"] for d in history for s in d["slots"]})
-    typical = past.groupby(past.index.tz_convert(LOCAL_TZ).strftime("%H:%M")).mean()
+    past_local = past.index.tz_convert(LOCAL_TZ)
+    overall = past.groupby(past_local.strftime("%H:%M")).mean()
+    by_weekday = past.groupby([past_local.weekday, past_local.strftime("%H:%M")]).mean()
+    weekday_days = {w: len({d["date"] for d in history if date.fromisoformat(d["date"]).weekday() == w}) for w in range(7)}
+
+    def typical_for(lt):
+        hm = lt.strftime("%H:%M")
+        # Same-weekday average needs at least 3 samples, otherwise use every recent day
+        if weekday_days[lt.weekday()] >= 3:
+            return by_weekday.get((lt.weekday(), hm), overall.get(hm))
+        return overall.get(hm)
 
     local = slots.tz_convert(LOCAL_TZ)
     values, sources = [], {}
     for ts, lt in zip(slots, local):
         day = lt.strftime("%Y-%m-%d")
         sources[day] = "actual" if day in actual_days else "estimated"
-        values.append(actual.get(ts, typical.get(lt.strftime("%H:%M"))) if day in actual_days
-                      else typical.get(lt.strftime("%H:%M")))
+        values.append(actual.get(ts, typical_for(lt)) if day in actual_days else typical_for(lt))
     return pd.Series(values, index=slots), [sources[d.isoformat()] for d in days]
 
 

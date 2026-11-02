@@ -93,7 +93,7 @@ If the cost is not recovered within 25 years, the result shows "> 25 yrs".
 
 ### Three-day forecast
 
-The "Yesterday, today & tomorrow" section fetches the Open-Meteo solar forecast for your roof and runs each quote's solar and battery over those three days with the same half-hourly model. Usage is the stored actual reading for a day when it is complete. Otherwise it is your average day over the last 28 stored days, and the chart labels it "estimated". Octopus data usually lags by a day or more, so today and tomorrow are always estimated. Yesterday's solar is modelled data rather than a true forecast. The battery starts empty at the beginning of yesterday.
+The "Yesterday, today & tomorrow" section fetches the Open-Meteo solar forecast for your roof and runs each quote's solar and battery over those three days with the same half-hourly model. Usage is the stored actual reading for a day when it is complete. Otherwise it is your average for that weekday over the last 8 weeks (or all recent days if there are fewer than three of that weekday), and the chart labels it "estimated". Octopus data usually lags by a day or more, so today and tomorrow are always estimated. Yesterday's solar is modelled data rather than a true forecast. The battery starts empty at the beginning of yesterday.
 
 ### Limitations
 

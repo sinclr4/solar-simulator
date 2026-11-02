@@ -552,7 +552,7 @@ function renderForecast() {
   drawForecast(f.days, s, q.battery_kwh);
   const est = f.days.filter(d => d.usage === "estimated").map(d => d.label.toLowerCase());
   document.getElementById("fcNote").textContent =
-    (est.length ? `Usage for ${est.join(", ")} is estimated from your average day over the last 28 stored days, because actual readings are not available yet. ` : "") +
+    (est.length ? `Usage for ${est.join(", ")} is estimated from your average for that weekday over the last 8 weeks, because actual readings are not available yet. ` : "") +
     "Solar is the Open-Meteo forecast (modelled for yesterday). The shaded band is the 23:30–05:30 off-peak window; battery stored (dashed) uses the right-hand axis and starts empty at the beginning of yesterday.";
 
   const rows = [
