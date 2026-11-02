@@ -13,7 +13,7 @@ For every quote, it runs three operating strategies:
 | Solar + battery (charged from solar only) | Solar only | Battery, then export |
 | Solar + battery + off-peak grid charging | Solar, plus cheap off-peak grid electricity | Battery, then export |
 | Grid charging + summer surplus to EV | Solar, plus cheap off-peak grid electricity | Battery, then the electric car (April–September), then export |
-| Full off-peak charge, sell surplus at export rate | Solar, plus a full off-peak grid charge | Battery, then export. Before sunrise, any battery energy beyond what that day's peak-rate usage needs is also sold at the export rate |
+| Full off-peak charge, sell surplus at export rate | Solar, plus a full off-peak grid charge | Battery, then export. From 21:30, any battery energy beyond what the rest of that evening needs is also sold at the export rate, just before off-peak starts |
 
 The last option only pays when the export rate, after the battery's round-trip loss, beats the off-peak rate. With 6.6p off-peak, 12p export and 89% efficiency, each kWh sold earns about 10.7p for 6.6p of electricity. That is a gain of roughly 4p, before counting extra battery wear from cycling daily.
 

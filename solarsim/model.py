@@ -64,6 +64,9 @@ def build_frame(cons_docs: list[dict], solar_docs: list[dict], system: System, t
     return df
 
 
+SELL_FROM_MIN = 21 * 60 + 30  # battery surplus is exported from 21:30 until off-peak starts at 23:30
+
+
 def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) -> pd.DataFrame:
     """Run the battery half-hour by half-hour and return the per-slot energy flows and costs."""
     eta = system.round_trip_eff ** 0.5
@@ -80,8 +83,10 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
             - (-net).clip(lower=0).groupby(peak["key"]).sum() * system.round_trip_eff).clip(lower=0)
     keys = sorted(df["key"].unique())
     target = {k: (cap if strat.export_arbitrage else min(cap, need.get(n, 0.0) / eta)) for k, n in zip(keys, keys[1:])}
-    reserve = {k: need.get(k, 0.0) / eta for k in keys}
-    pv_seen: set = set()
+    # Energy still needed after each slot until the off-peak window starts; the rest of the battery can be sold
+    later_need = (net.clip(lower=0)[::-1].groupby(peak["key"][::-1]).cumsum()[::-1] - net.clip(lower=0)) / eta
+    local_t = df.index.tz_convert(LOCAL_TZ)
+    sell_window = set(df.index[[(h * 60 + m >= SELL_FROM_MIN) for h, m in zip(local_t.hour, local_t.minute)]])
 
     soc = soc_solar = 0.0
     ev_div: dict = {}
@@ -126,11 +131,9 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
             solar_from_batt = dis * frac
             deficit -= dis
 
-        if pv > 0:
-            pv_seen.add(key)
-        # Only energy bought off-peak is sold: before sunrise, down to what today's peak-rate usage still needs
-        if strat.export_arbitrage and not offpk and key not in pv_seen and soc > reserve[key]:
-            sold = min((soc - reserve[key]) * eta, lim - dis, exp_lim - export)
+        # Sell what is left in the last hours before off-peak, keeping enough for the evening's usage
+        if strat.export_arbitrage and not offpk and t in sell_window and soc > later_need.get(t, 0.0):
+            sold = min((soc - later_need.get(t, 0.0)) * eta, lim - dis, exp_lim - export)
             if sold > 0:
                 soc -= sold / eta
                 export += sold
