@@ -58,6 +58,11 @@ def run_simulation():
     return jsonify(service.run(store(), request.get_json(silent=True) or {}))
 
 
+@app.post("/api/forecast")
+def run_forecast():
+    return jsonify(service.forecast(store(), request.get_json(silent=True) or {}))
+
+
 @app.get("/api/quotes")
 def list_quotes():
     return jsonify(service.list_quotes(store()))

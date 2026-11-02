@@ -63,7 +63,8 @@ def build_frame(cons_docs: list[dict], solar_docs: list[dict], system: System, t
     return df
 
 
-def simulate(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) -> dict:
+def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) -> pd.DataFrame:
+    """Run the battery half-hour by half-hour and return the per-slot energy flows and costs."""
     eta = system.round_trip_eff ** 0.5
     cap, lim = system.battery_kwh, system.battery_kw * SLOT_H
     exp_lim = system.export_limit_kw * SLOT_H
@@ -142,6 +143,11 @@ def simulate(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
     r["peak_import"] = r["import"].where(~r["offpeak"], 0.0)
     r["solar_to_peak"] = r["direct"].where(~r["offpeak"], 0.0) + r["solar_batt"]
     r["saving"] = r["cost_before"] - r["cost_after"]
+    return r
+
+
+def simulate(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) -> dict:
+    r = dispatch(df, system, tariff, strat)
     a = annualise(r)
     days = r.index.tz_convert(LOCAL_TZ).normalize().nunique()
     monthly = r.assign(ym=r.index.tz_convert(LOCAL_TZ).strftime("%Y-%m")).groupby("ym")[

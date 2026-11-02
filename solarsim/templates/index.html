@@ -143,6 +143,21 @@
       <div style="overflow-x:auto;margin-top:1.25rem"><table id="monthlyTable"></table></div>
     </div>
   </section>
+
+  <section class="card" id="forecastCard">
+    <h2>Yesterday, today &amp; tomorrow</h2>
+    <p class="muted">Forecast solar for your roof against your usage, showing what each quote's solar and battery would do across the three days. It uses the roof, tariff and quote settings above.</p>
+    <p class="row"><button type="button" id="forecastBtn">Show 3-day forecast</button><span id="forecastStatus" class="muted" aria-live="polite"></span></p>
+    <div id="forecastOut" class="hidden">
+      <div class="row">
+        <div><label for="fcQuote">Quote</label><select id="fcQuote"></select></div>
+        <div><label for="fcScenario">Option</label><select id="fcScenario"></select></div>
+      </div>
+      <svg id="fcChart" viewBox="0 0 900 340" width="100%" role="img" aria-label="Three-day solar, usage and battery chart" style="margin-top:.75rem"></svg>
+      <p id="fcNote" class="muted"></p>
+      <div style="overflow-x:auto;margin-top:.75rem"><table id="fcTable"></table></div>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -320,12 +335,17 @@ document.getElementById("fetchBtn").addEventListener("click", async (ev) => {
   finally { btn.disabled = false; }
 });
 
-form.addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const btn = document.getElementById("calcBtn"), st = document.getElementById("calcStatus");
+function formBody() {
   const body = {};
   for (const el of form.elements) if (el.name) body[el.name] = el.type === "checkbox" ? el.checked : el.value;
   body.quotes = [...quotesEl.children].map(quoteValues);
+  return body;
+}
+
+form.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const btn = document.getElementById("calcBtn"), st = document.getElementById("calcStatus");
+  const body = formBody();
   btn.disabled = true; st.textContent = `Calculating ${body.quotes.length} quote(s)…`; st.className = "muted";
   try {
     lastResult = await api("/api/simulate", body);
@@ -503,6 +523,106 @@ function renderMonthly(s) {
                      typeof v === "number" && v < 0 ? "neg" : ""));
     });
   }
+}
+
+const gbp2 = n => (n < 0 ? "-" : "") + "£" + Math.abs(n).toFixed(2);
+let lastForecast = null;
+
+document.getElementById("forecastBtn").addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget, st = document.getElementById("forecastStatus");
+  btn.disabled = true; st.textContent = "Fetching solar forecast…"; st.className = "muted";
+  try {
+    lastForecast = await api("/api/forecast", formBody());
+    const fq = document.getElementById("fcQuote"), fs = document.getElementById("fcScenario");
+    fq.replaceChildren(); fs.replaceChildren();
+    lastForecast.quotes.forEach((q, i) => fq.add(new Option(q.name, i)));
+    lastForecast.quotes[0].scenarios.forEach((s, i) => fs.add(new Option(s.scenario, i)));
+    fs.value = 1;
+    fq.onchange = fs.onchange = renderForecast;
+    document.getElementById("forecastOut").classList.remove("hidden");
+    renderForecast();
+    st.textContent = "";
+  } catch (e) { st.textContent = e.message; st.className = "error"; }
+  finally { btn.disabled = false; }
+});
+
+function renderForecast() {
+  const f = lastForecast, q = f.quotes[document.getElementById("fcQuote").value];
+  const s = q.scenarios[document.getElementById("fcScenario").value];
+  drawForecast(f.days, s, q.battery_kwh);
+  const est = f.days.filter(d => d.usage === "estimated").map(d => d.label.toLowerCase());
+  document.getElementById("fcNote").textContent =
+    (est.length ? `Usage for ${est.join(", ")} is estimated from your average day over the last 28 stored days, because actual readings are not available yet. ` : "") +
+    "Solar is the Open-Meteo forecast (modelled for yesterday). The shaded band is the 23:30–05:30 off-peak window; battery stored (dashed) uses the right-hand axis and starts empty at the beginning of yesterday.";
+
+  const rows = [
+    ["Usage", d => kwh1(d.load)], ["Solar generated", d => kwh1(d.pv)],
+    ["Grid import (incl. battery charging)", d => kwh1(d.import)], ["…of which battery charging", d => kwh1(d.grid_charge)],
+    ["Exported", d => kwh1(d.export)], ["Bill without solar", d => gbp2(d.cost_before)],
+    ["Bill with solar + battery", d => gbp2(d.cost_after)], ["Saving", d => gbp2(d.saving)]];
+  const t = document.getElementById("fcTable"); t.replaceChildren();
+  const hr = t.insertRow(); hr.append(cell("th", s.scenario));
+  f.days.forEach(d => hr.append(cell("th", `${d.label} (${d.date.slice(5)})`)));
+  for (const [label, fn] of rows) {
+    const tr = t.insertRow(); tr.append(cell("td", label));
+    s.days.forEach(d => tr.append(cell("td", fn(d))));
+  }
+}
+const kwh1 = n => n.toFixed(1) + " kWh";
+
+function drawForecast(days, s, capacity) {
+  const svg = document.getElementById("fcChart"), NS = "http://www.w3.org/2000/svg";
+  svg.replaceChildren();
+  const el = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text) e.textContent = text; svg.append(e); return e; };
+  const data = s.slots, n = data.length;
+  const W = 900, H = 340, L = 45, R = 230, T = 30, B = 30, PW = W - L - R, PH = H - T - B;
+  const x = i => L + (i + 0.5) / n * PW;
+  const kwMax = Math.max(0.5, ...data.flatMap(d => DAY_SERIES.map(([k]) => d[k]))) * 1.08;
+  const y = v => T + (1 - v / kwMax) * PH;
+  const socMax = Math.max(capacity || 0, ...data.map(d => d.soc), 0.1);
+  const ys = v => T + (1 - v / socMax) * PH;
+
+  for (let i = 0; i < n;) {
+    if (!data[i].offpeak) { i++; continue; }
+    let j = i; while (j < n && data[j].offpeak) j++;
+    el("rect", { x: L + i / n * PW, y: T, width: (j - i) / n * PW, height: PH, fill: "#eef2ff" });
+    i = j;
+  }
+  for (let i = 0; i <= 4; i++) {
+    const v = kwMax * i / 4;
+    el("line", { x1: L, x2: L + PW, y1: y(v), y2: y(v), stroke: "#eee" });
+    el("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end" }, v.toFixed(1));
+    el("text", { x: L + PW + 6, y: ys(socMax * i / 4) + 4 }, (socMax * i / 4).toFixed(0));
+  }
+  el("text", { x: 4, y: T + 4 }, "kW");
+  el("text", { x: L + PW + 6, y: T - 4 }, "kWh");
+
+  days.forEach((d, k) => {
+    const idx = data.map((p, i) => p.t.startsWith(d.date) ? i : -1).filter(i => i >= 0);
+    if (!idx.length) return;
+    const a = idx[0], b = idx[idx.length - 1] + 1;
+    if (k > 0) el("line", { x1: L + a / n * PW, x2: L + a / n * PW, y1: T, y2: T + PH, stroke: "#999", "stroke-dasharray": "4 3" });
+    el("text", { x: L + (a + b) / 2 / n * PW, y: T - 10, "text-anchor": "middle", "font-weight": "bold" },
+       `${d.label} (usage ${d.usage})`);
+    for (const h of ["00", "06", "12", "18"]) {
+      const i = idx.find(i => data[i].t.endsWith(` ${h}:00`));
+      if (i !== undefined) el("text", { x: x(i), y: H - 8, "text-anchor": "middle" }, `${h}:00`);
+    }
+  });
+
+  const line = (pts, attrs) => el("polyline", { points: pts.join(" "), fill: "none", ...attrs });
+  DAY_SERIES.forEach(([k, , colour, w]) => {
+    if (!data.some(d => d[k] > 0.005)) return;
+    line(data.map((d, i) => `${x(i)},${y(d[k])}`), { stroke: colour, "stroke-width": w });
+  });
+  line(data.map((d, i) => `${x(i)},${ys(d.soc)}`), { stroke: "#5b3ec8", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
+
+  [...DAY_SERIES.map(([, label, colour]) => [label, colour, false]), ["Battery stored (kWh)", "#5b3ec8", true]]
+    .forEach(([label, colour, dashed], i) => {
+      const ly = T + 6 + i * 20;
+      el("line", { x1: W - R + 45, x2: W - R + 65, y1: ly, y2: ly, stroke: colour, "stroke-width": 3, ...(dashed ? { "stroke-dasharray": "4 3" } : {}) });
+      el("text", { x: W - R + 72, y: ly + 4 }, label);
+    });
 }
 
 function drawChart(series) {

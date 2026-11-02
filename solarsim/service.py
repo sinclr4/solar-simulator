@@ -3,18 +3,27 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 from dateutil.relativedelta import relativedelta
 
 from . import octopus, weather
-from .model import LOCAL_TZ, Strategy, System, Tariff, annualise, build_frame, payback, simulate
+from .model import LOCAL_TZ, SLOT_H, Strategy, System, Tariff, annualise, build_frame, dispatch, payback, simulate
 from .store import Store
 
 ORIENTATIONS = {"east_west": "East / West", "south": "North / South (panels on south face)"}
 QUOTE_FIELDS = ("name", "solar_kwp", "battery_kwh", "battery_kw", "round_trip_eff", "export_limit_kw", "cost_gbp")
 MAX_QUOTES = 6
+STRATEGIES = [
+    Strategy("Solar + battery (charged from solar only)", grid_charge=False),
+    Strategy("Solar + battery + off-peak grid charging", grid_charge=True),
+    Strategy("Grid charging + summer surplus to EV", grid_charge=True, ev_surplus=True),
+]
+TYPICAL_DAYS = 28
+FORECAST_LABELS = ("Yesterday", "Today", "Tomorrow")
+FORECAST_FLOWS = ("load", "pv", "solar_charge", "grid_charge", "discharge", "import", "export", "ev_solar")
+FORECAST_TOTALS = ("load", "pv", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving")
 
 
 @dataclass
@@ -152,12 +161,16 @@ def ensure_solar(store: Store, start: pd.Timestamp, end: pd.Timestamp, tilt: flo
     return docs
 
 
-def run(store: Store, body: dict) -> dict:
-    """body holds the shared settings plus an optional `quotes` list overriding QUOTE_FIELDS per quote."""
+def _parse_quotes(body: dict) -> list[Inputs]:
     quotes = body.get("quotes") or [{}]
     if not isinstance(quotes, list) or not 1 <= len(quotes) <= MAX_QUOTES or not all(isinstance(q, dict) for q in quotes):
         raise ValueError(f"Provide between 1 and {MAX_QUOTES} quotes")
-    inputs = [Inputs.parse({**body, **{k: v for k, v in q.items() if k in QUOTE_FIELDS}}) for q in quotes]
+    return [Inputs.parse({**body, **{k: v for k, v in q.items() if k in QUOTE_FIELDS}}) for q in quotes]
+
+
+def run(store: Store, body: dict) -> dict:
+    """body holds the shared settings plus an optional `quotes` list overriding QUOTE_FIELDS per quote."""
+    inputs = _parse_quotes(body)
     base = inputs[0]
 
     start, end = _window(base.days)
@@ -194,11 +207,7 @@ def _run_quote(store: Store, unit: pd.DataFrame, inp: Inputs, tariff: Tariff, ru
     df = unit.copy()
     df["pv"] *= inp.solar_kwp
 
-    strategies = [
-        Strategy("Solar + battery (charged from solar only)", grid_charge=False),
-        Strategy("Solar + battery + off-peak grid charging", grid_charge=True),
-        Strategy("Grid charging + summer surplus to EV", grid_charge=True, ev_surplus=True),
-    ]
+    strategies = STRATEGIES
     install = pd.Timestamp(inp.install_date) if inp.install_date else pd.Timestamp.now().normalize()
     inflations = sorted({0.0, inp.price_rise_pct / 100})
     safe_name = "".join(c for c in inp.name if c not in "/\\?#")
@@ -222,3 +231,76 @@ def _run_quote(store: Store, unit: pd.DataFrame, inp: Inputs, tariff: Tariff, ru
         scenarios.append(res)
 
     return {"name": inp.name, **{k: getattr(inp, k) for k in QUOTE_FIELDS}, "scenarios": scenarios}
+
+
+def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple[pd.Series, list[str]]:
+    """Actual stored usage for each day where available, otherwise the average of the last stored days."""
+    first = days[0]
+    docs = store.by_date("consumption", (first - timedelta(days=TYPICAL_DAYS)).isoformat(),
+                         (days[-1] + timedelta(days=1)).isoformat())
+    history = [d for d in docs if d["date"] < first.isoformat()]
+    if not history:
+        raise ValueError("No usage data stored - fetch usage data first")
+    actual = {pd.Timestamp(s["start"]): s["kwh"] for d in docs if d["date"] >= first.isoformat() for s in d["slots"]}
+    actual_days = {d["date"] for d in docs if d["date"] >= first.isoformat() and len(d["slots"]) >= 46}
+
+    past = pd.Series({pd.Timestamp(s["start"]): s["kwh"] for d in history for s in d["slots"]})
+    typical = past.groupby(past.index.tz_convert(LOCAL_TZ).strftime("%H:%M")).mean()
+
+    local = slots.tz_convert(LOCAL_TZ)
+    values, sources = [], {}
+    for ts, lt in zip(slots, local):
+        day = lt.strftime("%Y-%m-%d")
+        sources[day] = "actual" if day in actual_days else "estimated"
+        values.append(actual.get(ts, typical.get(lt.strftime("%H:%M"))) if day in actual_days
+                      else typical.get(lt.strftime("%H:%M")))
+    return pd.Series(values, index=slots), [sources[d.isoformat()] for d in days]
+
+
+def forecast(store: Store, body: dict) -> dict:
+    """Yesterday, today and tomorrow: forecast solar against usage, run through each quote's battery."""
+    inputs = _parse_quotes(body)
+    base = inputs[0]
+    today = pd.Timestamp.now(tz=LOCAL_TZ).date()
+    days = [today + timedelta(days=i) for i in (-1, 0, 1)]
+    start = pd.Timestamp(days[0]).tz_localize(LOCAL_TZ)
+    end = pd.Timestamp(days[-1] + timedelta(days=1)).tz_localize(LOCAL_TZ)
+    slots = pd.date_range(start, end, freq="30min", inclusive="left").tz_convert("UTC")
+
+    usage, sources = _three_day_usage(store, days, slots)
+    faces = base.faces()
+    irradiance = weather.fetch_forecast_faces(base.tilt, [f for f, w in faces.items() if w])
+    solar_docs = [{"hourly": [{"end": t.isoformat(), **row} for t, row in irradiance.to_dict(orient="index").items()]}]
+    cons_docs = [{"slots": [{"start": t.isoformat(), "kwh": k} for t, k in usage.items()]}]
+
+    tariff = Tariff(peak_p=base.peak_p, offpeak_p=base.offpeak_p, export_p=base.export_p)
+    unit = build_frame(cons_docs, solar_docs, System(solar_kwp=1, performance_ratio=base.performance_ratio), tariff, faces)
+    if unit.empty:
+        raise ValueError("No solar forecast is available right now - try again later")
+
+    quotes = []
+    for inp in inputs:
+        system = System(solar_kwp=inp.solar_kwp, battery_kwh=inp.battery_kwh, battery_kw=inp.battery_kw,
+                        round_trip_eff=inp.round_trip_eff, export_limit_kw=inp.export_limit_kw,
+                        performance_ratio=inp.performance_ratio, cost_gbp=inp.cost_gbp)
+        df = unit.copy()
+        df["pv"] *= inp.solar_kwp
+        scenarios = []
+        for strat in STRATEGIES:
+            r = dispatch(df, system, tariff, strat)
+            local = r.index.tz_convert(LOCAL_TZ)
+            totals = r[list(FORECAST_TOTALS)].groupby(local.strftime("%Y-%m-%d")).sum().round(2)
+            flows = r[list(FORECAST_FLOWS)] / SLOT_H
+            flows["import"] -= flows["grid_charge"]
+            scenarios.append({
+                "scenario": strat.name,
+                "days": [{"date": d.isoformat(), **totals.loc[d.isoformat()].to_dict()}
+                         for d in days if d.isoformat() in totals.index],
+                "slots": [{"t": lt.strftime("%Y-%m-%d %H:%M"), "offpeak": bool(op),
+                           **{k: round(float(row[k]), 3) for k in FORECAST_FLOWS}, "soc": round(float(soc), 3)}
+                          for lt, op, soc, (_, row) in zip(local, r["offpeak"], r["soc"], flows.iterrows())],
+            })
+        quotes.append({"name": inp.name, "battery_kwh": inp.battery_kwh, "scenarios": scenarios})
+
+    return {"days": [{"date": d.isoformat(), "label": lbl, "usage": src}
+                     for d, lbl, src in zip(days, FORECAST_LABELS, sources)], "quotes": quotes}

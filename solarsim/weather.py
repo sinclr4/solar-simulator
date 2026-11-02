@@ -6,24 +6,35 @@ import pandas as pd
 import requests
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 PVGIS_URL = "https://re.jrc.ec.europa.eu/api/v5_3/PVcalc"
 YORK = (53.96, -1.08)
 # Open-Meteo and PVGIS share the convention 0=south, -90=east, 90=west
 FACE_AZIMUTH = {"south": 0, "east": -90, "west": 90}
 
 
-def fetch_tilted_irradiance(start: date, end: date, tilt: float, azimuth: float,
-                            lat: float = YORK[0], lon: float = YORK[1]) -> pd.Series:
-    """Hourly plane-of-array irradiance (W/m²), indexed by UTC hour-end (Open-Meteo values are preceding-hour means)."""
-    params = {"latitude": lat, "longitude": lon,
-              "start_date": start.isoformat(), "end_date": end.isoformat(),
-              "hourly": "global_tilted_irradiance", "tilt": tilt, "azimuth": azimuth,
-              "timezone": "GMT"}
-    r = requests.get(ARCHIVE_URL, params=params, timeout=60)
+def _irradiance_series(url: str, params: dict) -> pd.Series:
+    r = requests.get(url, params={"hourly": "global_tilted_irradiance", "timezone": "GMT", **params}, timeout=60)
     r.raise_for_status()
     hourly = r.json()["hourly"]
     idx = pd.to_datetime(hourly["time"]).tz_localize("UTC")
     return pd.Series(hourly["global_tilted_irradiance"], index=idx, dtype="float")
+
+
+def fetch_tilted_irradiance(start: date, end: date, tilt: float, azimuth: float,
+                            lat: float = YORK[0], lon: float = YORK[1]) -> pd.Series:
+    """Hourly plane-of-array irradiance (W/m²), indexed by UTC hour-end (Open-Meteo values are preceding-hour means)."""
+    return _irradiance_series(ARCHIVE_URL, {"latitude": lat, "longitude": lon,
+                                            "start_date": start.isoformat(), "end_date": end.isoformat(),
+                                            "tilt": tilt, "azimuth": azimuth})
+
+
+def fetch_forecast_faces(tilt: float, faces: list[str], lat: float = YORK[0], lon: float = YORK[1]) -> pd.DataFrame:
+    """Hourly irradiance for the two days before to the two days after today, for the given roof faces."""
+    return pd.DataFrame({f: _irradiance_series(FORECAST_URL, {"latitude": lat, "longitude": lon, "tilt": tilt,
+                                                              "azimuth": FACE_AZIMUTH[f], "past_days": 2,
+                                                              "forecast_days": 3})
+                         for f in faces}).dropna()
 
 
 def fetch_faces(start: date, end: date, tilt: float) -> pd.DataFrame:
