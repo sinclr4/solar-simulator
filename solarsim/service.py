@@ -132,6 +132,9 @@ def octopus_status(store: Store) -> dict:
     doc = store.get("settings", OCTOPUS_DOC)
     if doc:
         return {"connected": True, "account": doc["account"], "mpan_ending": doc["mpan"][-4:]}
+    env = _octopus_details(store)
+    if env:
+        return {"connected": True, "account": env["account"], "mpan_ending": env["mpan"][-4:]}
     return {"connected": False}
 
 
