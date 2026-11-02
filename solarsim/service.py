@@ -19,6 +19,7 @@ STRATEGIES = [
     Strategy("Solar + battery (charged from solar only)", grid_charge=False),
     Strategy("Solar + battery + off-peak grid charging", grid_charge=True),
     Strategy("Grid charging + summer surplus to EV", grid_charge=True, ev_surplus=True),
+    Strategy("Full off-peak charge, sell surplus at export rate", grid_charge=True, export_arbitrage=True),
 ]
 TYPICAL_DAYS = 56
 FORECAST_LABELS = ("Yesterday", "Today", "Tomorrow")

@@ -37,6 +37,7 @@ class System:
 class Strategy:
     name: str
     grid_charge: bool = True    # top battery up at off-peak rate to cover the next day's peak deficit
+    export_arbitrage: bool = False  # fill the battery off-peak and sell the surplus at dawn at the export rate
     ev_surplus: bool = False    # divert surplus solar to the car in ev_months
     ev_months: tuple = field(default=(4, 5, 6, 7, 8, 9))
     ev_min_kw: float = 1.4
@@ -78,7 +79,9 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
     need = (net.clip(lower=0).groupby(peak["key"]).sum()
             - (-net).clip(lower=0).groupby(peak["key"]).sum() * system.round_trip_eff).clip(lower=0)
     keys = sorted(df["key"].unique())
-    target = {k: min(cap, need.get(n, 0.0) / eta) for k, n in zip(keys, keys[1:])}
+    target = {k: (cap if strat.export_arbitrage else min(cap, need.get(n, 0.0) / eta)) for k, n in zip(keys, keys[1:])}
+    reserve = {k: need.get(k, 0.0) / eta for k in keys}
+    pv_seen: set = set()
 
     soc = soc_solar = 0.0
     ev_div: dict = {}
@@ -122,6 +125,15 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
             soc_solar = max(0.0, soc_solar - dis / eta * frac)
             solar_from_batt = dis * frac
             deficit -= dis
+
+        if pv > 0:
+            pv_seen.add(key)
+        # Only energy bought off-peak is sold: before sunrise, down to what today's peak-rate usage still needs
+        if strat.export_arbitrage and not offpk and key not in pv_seen and soc > reserve[key]:
+            sold = min((soc - reserve[key]) * eta, lim - dis, exp_lim - export)
+            if sold > 0:
+                soc -= sold / eta
+                export += sold
 
         grid_chg = 0.0
         if offpk and strat.grid_charge:
