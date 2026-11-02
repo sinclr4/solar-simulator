@@ -537,14 +537,21 @@ document.getElementById("forecastBtn").addEventListener("click", async (ev) => {
     fq.replaceChildren(); fs.replaceChildren();
     lastForecast.quotes.forEach((q, i) => fq.add(new Option(q.name, i)));
     lastForecast.quotes[0].scenarios.forEach((s, i) => fs.add(new Option(s.scenario, i)));
-    fs.value = 1;
-    fq.onchange = fs.onchange = renderForecast;
+    fq.onchange = () => { pickBestForecast(); renderForecast(); };
+    fs.onchange = renderForecast;
+    pickBestForecast();
     document.getElementById("forecastOut").classList.remove("hidden");
     renderForecast();
     st.textContent = "";
   } catch (e) { st.textContent = e.message; st.className = "error"; }
   finally { btn.disabled = false; }
 });
+
+function pickBestForecast() {
+  const q = lastForecast.quotes[document.getElementById("fcQuote").value];
+  const total = sc => sc.days.reduce((a, d) => a + d.saving, 0);
+  document.getElementById("fcScenario").value = q.scenarios.reduce((b, sc, i, all) => total(sc) > total(all[b]) ? i : b, 0);
+}
 
 function renderForecast() {
   const f = lastForecast, q = f.quotes[document.getElementById("fcQuote").value];
