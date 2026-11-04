@@ -172,7 +172,7 @@
       <h3 style="margin-top:1.25rem">Energy flow <span id="skTotal" class="muted" style="font-weight:normal"></span></h3>
       <div class="row"><div><label for="skDay">Day</label><select id="skDay"></select></div></div>
       <svg id="skChart" viewBox="0 0 760 460" width="100%" role="img" aria-label="Energy flow for the selected day" style="display:block;margin:.5rem auto 0;max-width:760px"></svg>
-      <p class="muted">Left: where the energy came from. Right: where it went. Each ribbon shows how much of a source went to each use. "Charging" is battery charging plus any usage between 23:30 and 05:30, which is treated as battery/EV charging; "Load" is usage outside that window. "Battery" on the left is what the battery gave back (to the house or sold), so the gap between it and battery charging is round-trip loss plus any change in stored energy. "Grid" on the right is export.</p>
+      <p class="muted">Left: where the energy came from. Right: where it went. Each ribbon shows how much of a source went to each use. "Charging" is battery charging plus any usage between 23:30 and 05:30 and any EV charging recorded by Octopus outside that window; "Load" is everything else. "Battery" on the left is what the battery gave back (to the house or sold), so the gap between it and battery charging is round-trip loss plus any change in stored energy. "Grid" on the right is export.</p>
     </div>
   </section>
 </main>
@@ -664,11 +664,11 @@ function drawSankey(d) {
     { id: "curtailed", name: "Curtailed", icon: "🚫", colour: "#c0c0c0" }];
   const gridHouse = Math.max(0, v("import") - v("grid_charge"));
   const links = [
-    ["solar", "charge", v("solar_charge") + v("offpeak_direct")], ["solar", "load", v("direct") - v("offpeak_direct")],
+    ["solar", "charge", v("solar_charge") + v("chg_direct")], ["solar", "load", v("direct") - v("chg_direct")],
     ["solar", "export", solarExport], ["solar", "ev", v("ev_solar")], ["solar", "curtailed", v("curtailed")],
-    ["battery", "charge", v("offpeak_discharge")], ["battery", "load", v("discharge") - v("offpeak_discharge")],
+    ["battery", "charge", v("chg_discharge")], ["battery", "load", v("discharge") - v("chg_discharge")],
     ["battery", "export", battExport],
-    ["grid", "charge", v("grid_charge") + v("offpeak_grid_house")], ["grid", "load", gridHouse - v("offpeak_grid_house")]]
+    ["grid", "charge", v("grid_charge") + v("chg_grid_house")], ["grid", "load", gridHouse - v("chg_grid_house")]]
     .filter(l => l[2] > 0.005).map(([s, t, val]) => ({ s, t, val }));
   const sized = (side, key) => side.map(n => ({ ...n, size: links.filter(l => l[key] === n.id).reduce((a, l) => a + l.val, 0) }))
     .filter(n => n.size > 0.005);

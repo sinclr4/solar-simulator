@@ -32,7 +32,7 @@ TYPICAL_DAYS = 56
 FORECAST_LABELS = ("Two days ago", "Yesterday", "Today")
 FORECAST_FLOWS = ("load", "pv", "solar_charge", "grid_charge", "discharge", "import", "export", "ev_solar")
 FORECAST_TOTALS = ("load", "pv", "solar_charge", "direct", "discharge", "ev_solar", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving",
-                   "offpeak_direct", "offpeak_discharge", "offpeak_grid_house")
+                   "chg_direct", "chg_discharge", "chg_grid_house")
 
 
 @dataclass
@@ -175,6 +175,20 @@ def _live_rows(env: dict) -> tuple[pd.Timestamp, list[dict], str | None]:
     return live_start, [r for r in live if pd.Timestamp(r["interval_start"]) + pd.Timedelta(minutes=30) <= now], None
 
 
+def _attach_ev(env: dict, rows: list[dict], since: pd.Timestamp) -> None:
+    """Add Octopus's modelled EV usage to each half-hourly row from `since`; rows are left alone if it's unavailable."""
+    try:
+        readings = octopus.fetch_ev_readings(env["api_key"], env["account"], since.isoformat(),
+                                             (pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=1)).isoformat())
+    except (requests.RequestException, ValueError):
+        return
+    ev = {pd.Timestamp(k): v for k, v in readings.items()}
+    for r in rows:
+        t = pd.Timestamp(r["interval_start"])
+        if t >= since:
+            r["ev"] = round(min(ev.get(t, 0.0), r["consumption"]), 3)
+
+
 def refresh_recent(store: Store) -> None:
     """Bring the last two days and today up to date; silently keeps stored data if Octopus is unavailable."""
     env = None
@@ -183,7 +197,9 @@ def refresh_recent(store: Store) -> None:
     except ValueError:
         pass
     if env:
-        _store_rows(store, _live_rows(env)[1])
+        live_start, live, _ = _live_rows(env)
+        _attach_ev(env, live, live_start)
+        _store_rows(store, live)
 
 
 def fetch_consumption(store: Store, days: int) -> dict:
@@ -199,8 +215,9 @@ def fetch_consumption(store: Store, days: int) -> dict:
     live_start, live, live_error = _live_rows(env)
     if live:
         rows = [r for r in rows if pd.Timestamp(r["interval_start"]) < live_start] + live
+    _attach_ev(env, rows, start)
     return {"fetched_days": _store_rows(store, rows), "live_slots": len(live), "live_error": live_error,
-            **data_status(store)}
+            "ev_slots": sum(1 for r in rows if r.get("ev", 0) > 0), **data_status(store)}
 
 
 def _store_rows(store: Store, rows: list[dict]) -> int:
@@ -214,11 +231,15 @@ def _store_rows(store: Store, rows: list[dict]) -> int:
     cons["date"] = local.dt.strftime("%Y-%m-%d")
     mins = local.dt.hour * 60 + local.dt.minute
     cons["offpeak"] = (mins >= 23 * 60 + 30) | (mins < 5 * 60 + 30)
+    has_ev = "ev" in cons.columns
+    if has_ev:
+        cons["ev"] = cons["ev"].fillna(0.0)
     docs = [{
         "id": d, "date": d,
         "total_kwh": round(g["consumption"].sum(), 3),
         "offpeak_kwh": round(g.loc[g["offpeak"], "consumption"].sum(), 3),
-        "slots": [{"start": s.isoformat(), "kwh": k} for s, k in zip(g["start"], g["consumption"])],
+        "slots": [{"start": s.isoformat(), "kwh": k, **({"ev": e} if has_ev else {})}
+                  for s, k, e in zip(g["start"], g["consumption"], g["ev"] if has_ev else g["consumption"])],
     } for d, g in cons.groupby("date")]
     store.upsert("consumption", docs)
     return len(docs)
@@ -314,7 +335,7 @@ def _run_quote(store: Store, unit: pd.DataFrame, inp: Inputs, tariff: Tariff, ru
     return {"name": inp.name, **{k: getattr(inp, k) for k in QUOTE_FIELDS}, "scenarios": scenarios}
 
 
-def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple[pd.Series, list[str], list[float]]:
+def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple[pd.Series, list[str], list[float], pd.Series]:
     """Actual stored usage for each day where available, otherwise the average for the same weekday over the last 8 weeks."""
     first = days[0]
     docs = store.by_date("consumption", (first - timedelta(days=TYPICAL_DAYS)).isoformat(),
@@ -324,6 +345,7 @@ def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple
         raise ValueError("No usage data stored - fetch usage data first")
     recent = [d for d in docs if d["date"] >= first.isoformat()]
     actual = {pd.Timestamp(s["start"]): s["kwh"] for d in recent for s in d["slots"]}
+    actual_ev = {pd.Timestamp(s["start"]): s.get("ev", 0.0) for d in recent for s in d["slots"]}
     day_slots = {d["date"]: len(d["slots"]) for d in recent}
 
     past = pd.Series({pd.Timestamp(s["start"]): s["kwh"] for d in history for s in d["slots"]})
@@ -346,7 +368,7 @@ def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple
         n = day_slots.get(day.isoformat(), 0)
         return "actual" if n >= 46 else "partial" if n else "estimated"
     actual_kwh = [sum(v for ts, lt, v in zip(slots, local, values) if ts in actual and lt.date() == d) for d in days]
-    return pd.Series(values, index=slots), [source(d) for d in days], actual_kwh
+    return pd.Series(values, index=slots), [source(d) for d in days], actual_kwh, pd.Series([actual_ev.get(ts, 0.0) for ts in slots], index=slots)
 
 
 def forecast(store: Store, body: dict) -> dict:
@@ -360,11 +382,11 @@ def forecast(store: Store, body: dict) -> dict:
     end = pd.Timestamp(days[-1] + timedelta(days=1)).tz_localize(LOCAL_TZ)
     slots = pd.date_range(start, end, freq="30min", inclusive="left").tz_convert("UTC")
 
-    usage, sources, actual_kwh = _three_day_usage(store, days, slots)
+    usage, sources, actual_kwh, ev_usage = _three_day_usage(store, days, slots)
     faces = base.faces()
     irradiance = weather.fetch_forecast_faces(base.tilt, [f for f, w in faces.items() if w])
     solar_docs = [{"hourly": [{"end": t.isoformat(), **row} for t, row in irradiance.to_dict(orient="index").items()]}]
-    cons_docs = [{"slots": [{"start": t.isoformat(), "kwh": k} for t, k in usage.items()]}]
+    cons_docs = [{"slots": [{"start": t.isoformat(), "kwh": k, "ev": ev_usage[t]} for t, k in usage.items()]}]
 
     tariff = Tariff(peak_p=base.peak_p, offpeak_p=base.offpeak_p, export_p=base.export_p)
     unit = build_frame(cons_docs, solar_docs, System(solar_kwp=1, performance_ratio=base.performance_ratio), tariff, faces)
@@ -381,10 +403,12 @@ def forecast(store: Store, body: dict) -> dict:
         scenarios = []
         for strat in STRATEGIES:
             r = dispatch(df, system, tariff, strat)
-            # Usage inside the off-peak window is treated as battery/EV charging in the energy-flow chart
-            r["offpeak_direct"] = r["direct"].where(r["offpeak"], 0.0)
-            r["offpeak_discharge"] = r["discharge"].where(r["offpeak"], 0.0)
-            r["offpeak_grid_house"] = (r["import"] - r["grid_charge"]).where(r["offpeak"], 0.0)
+            # Usage inside the off-peak window, plus actual EV usage outside it, is shown as battery/EV charging
+            load = r["load"].where(r["load"] > 0)
+            share = ((df["ev"].reindex(r.index).clip(upper=r["load"]) / load).fillna(0.0)).where(~r["offpeak"], 1.0)
+            r["chg_direct"] = r["direct"] * share
+            r["chg_discharge"] = r["discharge"] * share
+            r["chg_grid_house"] = (r["import"] - r["grid_charge"]) * share
             local = r.index.tz_convert(LOCAL_TZ)
             totals = r[list(FORECAST_TOTALS)].groupby(local.strftime("%Y-%m-%d")).sum().round(2)
             flows = r[list(FORECAST_FLOWS)] / SLOT_H

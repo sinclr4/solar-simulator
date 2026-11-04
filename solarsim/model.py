@@ -6,6 +6,7 @@ import pandas as pd
 
 LOCAL_TZ = "Europe/London"
 SLOT_H = 0.5
+EV_SLOT_KWH = 0.05  # EV usage above this in a half-hour marks a cheap-rate smart-charge slot
 
 
 def _mins(hhmm: str) -> int:
@@ -48,16 +49,19 @@ def build_frame(cons_docs: list[dict], solar_docs: list[dict], system: System, t
                 faces: dict[str, float]) -> pd.DataFrame:
     """faces maps roof face (south/east/west) to the share of panels on it."""
     load = pd.Series({pd.Timestamp(s["start"]): s["kwh"] for d in cons_docs for s in d["slots"]}).sort_index()
+    ev = pd.Series({pd.Timestamp(s["start"]): s.get("ev", 0.0) for d in cons_docs for s in d["slots"]}).sort_index()
     gti = pd.Series({pd.Timestamp(h["end"]): sum(h[f] * w for f, w in faces.items())
                      for d in solar_docs for h in d["hourly"]}).sort_index()
     hour_end = load.index.floor("h") + pd.Timedelta(hours=1)
     pv_kw_per_kwp = pd.Series(gti.reindex(hour_end).to_numpy(), index=load.index) / 1000 * system.performance_ratio
-    df = pd.DataFrame({"load": load, "pv": pv_kw_per_kwp * system.solar_kwp * SLOT_H}).dropna()
+    df = pd.DataFrame({"load": load, "ev": ev, "pv": pv_kw_per_kwp * system.solar_kwp * SLOT_H}).dropna()
 
     local = df.index.tz_convert(LOCAL_TZ)
     mins = local.hour * 60 + local.minute
     start, end = _mins(tariff.offpeak_start), _mins(tariff.offpeak_end)
     df["offpeak"] = (mins >= start) | (mins < end)
+    # EV charging outside the window is an Intelligent Octopus smart-charge slot, billed at the off-peak rate
+    df["cheap"] = df["offpeak"] | (df["ev"] >= EV_SLOT_KWH)
     # "session day" runs from end of off-peak to end of the following off-peak, so each day's peak precedes its night
     df["key"] = (local - pd.Timedelta(minutes=end)).date
     df["month"] = local.month
@@ -74,9 +78,13 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
     exp_lim = system.export_limit_kw * SLOT_H
     ev_min, ev_max = strat.ev_min_kw * SLOT_H, strat.ev_max_kw * SLOT_H
 
-    off, peak = df[df.offpeak], df[~df.offpeak]
+    df = df.assign(cheap=df["cheap"] if "cheap" in df else df["offpeak"], ev_kwh=df["ev"] if "ev" in df else 0.0)
+    has_ev = df["ev_kwh"].sum() > 0
+    off, peak = df[df.offpeak], df[~df.cheap]
     house_base = off["load"].quantile(0.2)
-    ev_budget = (off["load"] - house_base).clip(lower=0).groupby(off["key"]).sum().to_dict()
+    cheap_df = df[df.cheap]
+    ev_budget = (cheap_df["ev_kwh"].groupby(cheap_df["key"]).sum() if has_ev
+                 else (off["load"] - house_base).clip(lower=0).groupby(off["key"]).sum()).to_dict()
 
     net = peak["load"] - peak["pv"]
     need = (net.clip(lower=0).groupby(peak["key"]).sum()
@@ -92,10 +100,11 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
     ev_div: dict = {}
     ev_credit: dict = {}
     out = []
-    for t, load0, pv, offpk, key, month in df[["load", "pv", "offpeak", "key", "month"]].itertuples():
+    for t, load0, pv, offpk, key, month, cheap, ev_slot in df[
+            ["load", "pv", "offpeak", "key", "month", "cheap", "ev_kwh"]].itertuples():
         load = load0
-        if offpk and ev_credit.get(key, 0.0) > 0:
-            cut = min(ev_credit[key], max(0.0, load - house_base))
+        if cheap and ev_credit.get(key, 0.0) > 0:
+            cut = min(ev_credit[key], ev_slot if has_ev else max(0.0, load - house_base))
             load -= cut
             ev_credit[key] -= cut
 
@@ -110,7 +119,7 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
         room -= c
 
         ev = 0.0
-        if strat.ev_surplus and not offpk and month in strat.ev_months and surplus >= ev_min:
+        if strat.ev_surplus and not cheap and month in strat.ev_months and surplus >= ev_min:
             ev = min(surplus, ev_max, ev_budget.get(key, 0.0) - ev_div.get(key, 0.0))
             if ev >= ev_min:
                 ev_div[key] = ev_div.get(key, 0.0) + ev
@@ -123,7 +132,7 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
         curtailed = surplus - export
 
         dis = solar_from_batt = 0.0
-        if not offpk and deficit > 0 and soc > 0:
+        if not cheap and deficit > 0 and soc > 0:
             dis = min(deficit, lim, soc * eta)
             frac = soc_solar / soc
             soc -= dis / eta
@@ -132,7 +141,7 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
             deficit -= dis
 
         # Sell what is left in the last hours before off-peak, keeping enough for the evening's usage
-        if strat.export_arbitrage and not offpk and t in sell_window and soc > later_need.get(t, 0.0):
+        if strat.export_arbitrage and not cheap and t in sell_window and soc > later_need.get(t, 0.0):
             sold = min((soc - later_need.get(t, 0.0)) * eta, lim - dis, exp_lim - export)
             if sold > 0:
                 soc -= sold / eta
@@ -143,20 +152,20 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
             grid_chg = max(0.0, min(room, (target.get(key, 0.0) - soc) / eta))
             soc += grid_chg * eta
 
-        out.append((t, load0, pv, offpk, month, direct, solar_from_batt, ev, export, curtailed,
+        out.append((t, load0, pv, offpk, cheap, month, direct, solar_from_batt, ev, export, curtailed,
                     deficit + grid_chg, grid_chg, c, dis, soc))
 
-    r = pd.DataFrame(out, columns=["t", "load", "pv", "offpeak", "month", "direct", "solar_batt", "ev_solar",
+    r = pd.DataFrame(out, columns=["t", "load", "pv", "offpeak", "cheap", "month", "direct", "solar_batt", "ev_solar",
                                    "export", "curtailed", "import", "grid_charge", "solar_charge",
                                    "discharge", "soc"]).set_index("t")
-    rate = r["offpeak"].map({True: tariff.offpeak_p, False: tariff.peak_p}) / 100
+    rate = r["cheap"].map({True: tariff.offpeak_p, False: tariff.peak_p}) / 100
     r["cost_before"] = r["load"] * rate
     r["cost_after"] = r["import"] * rate - r["export"] * tariff.export_p / 100
 
-    r["peak_load"] = r["load"].where(~r["offpeak"], 0.0)
+    r["peak_load"] = r["load"].where(~r["cheap"], 0.0)
     r["offpeak_load"] = r["load"] - r["peak_load"]
-    r["peak_import"] = r["import"].where(~r["offpeak"], 0.0)
-    r["solar_to_peak"] = r["direct"].where(~r["offpeak"], 0.0) + r["solar_batt"]
+    r["peak_import"] = r["import"].where(~r["cheap"], 0.0)
+    r["solar_to_peak"] = r["direct"].where(~r["cheap"], 0.0) + r["solar_batt"]
     r["saving"] = r["cost_before"] - r["cost_after"]
     return r
 
