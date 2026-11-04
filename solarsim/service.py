@@ -31,7 +31,8 @@ STRATEGIES = [
 TYPICAL_DAYS = 56
 FORECAST_LABELS = ("Two days ago", "Yesterday", "Today")
 FORECAST_FLOWS = ("load", "pv", "solar_charge", "grid_charge", "discharge", "import", "export", "ev_solar")
-FORECAST_TOTALS = ("load", "pv", "solar_charge", "direct", "discharge", "ev_solar", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving")
+FORECAST_TOTALS = ("load", "pv", "solar_charge", "direct", "discharge", "ev_solar", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving",
+                   "offpeak_direct", "offpeak_discharge", "offpeak_grid_house")
 
 
 @dataclass
@@ -380,6 +381,10 @@ def forecast(store: Store, body: dict) -> dict:
         scenarios = []
         for strat in STRATEGIES:
             r = dispatch(df, system, tariff, strat)
+            # Usage inside the off-peak window is treated as battery/EV charging in the energy-flow chart
+            r["offpeak_direct"] = r["direct"].where(r["offpeak"], 0.0)
+            r["offpeak_discharge"] = r["discharge"].where(r["offpeak"], 0.0)
+            r["offpeak_grid_house"] = (r["import"] - r["grid_charge"]).where(r["offpeak"], 0.0)
             local = r.index.tz_convert(LOCAL_TZ)
             totals = r[list(FORECAST_TOTALS)].groupby(local.strftime("%Y-%m-%d")).sum().round(2)
             flows = r[list(FORECAST_FLOWS)] / SLOT_H
