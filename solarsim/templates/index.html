@@ -169,6 +169,10 @@
       <svg id="fcChart" viewBox="0 0 900 340" width="100%" role="img" aria-label="Three-day solar, usage and battery chart" style="margin-top:.75rem"></svg>
       <p id="fcNote" class="muted"></p>
       <div style="overflow-x:auto;margin-top:.75rem"><table id="fcTable"></table></div>
+      <h3 style="margin-top:1.25rem">Energy flow <span id="skTotal" class="muted" style="font-weight:normal"></span></h3>
+      <div class="row"><div><label for="skDay">Day</label><select id="skDay"></select></div></div>
+      <svg id="skChart" viewBox="0 0 760 460" width="100%" role="img" aria-label="Energy flow for the selected day" style="margin-top:.5rem;max-width:760px"></svg>
+      <p class="muted">Left: where the energy came from. Right: where it went. Each ribbon shows how much of a source went to each use. "Battery" on the left is what the battery gave back (to the house or sold) and "Battery" on the right is what it was charged with, so the gap between them is round-trip loss plus any change in stored energy. "Grid" on the right is export.</p>
     </div>
   </section>
 </main>
@@ -585,6 +589,11 @@ document.getElementById("forecastBtn").addEventListener("click", async (ev) => {
     lastForecast.quotes[0].scenarios.forEach((s, i) => fs.add(new Option(s.scenario, i)));
     fq.onchange = () => { pickBestForecast(); renderForecast(); };
     fs.onchange = renderForecast;
+    const sk = document.getElementById("skDay");
+    sk.replaceChildren();
+    lastForecast.days.forEach((d, i) => sk.add(new Option(`${d.label} (${d.date.slice(5)})`, i)));
+    sk.value = lastForecast.days.length - 1;
+    sk.onchange = renderSankey;
     pickBestForecast();
     document.getElementById("forecastOut").classList.remove("hidden");
     renderForecast();
@@ -603,6 +612,7 @@ function renderForecast() {
   const f = lastForecast, q = f.quotes[document.getElementById("fcQuote").value];
   const s = q.scenarios[document.getElementById("fcScenario").value];
   drawForecast(f.days, s, q.battery_kwh);
+  renderSankey();
   const est = f.days.filter(d => d.usage === "estimated").map(d => d.label.toLowerCase());
   const part = f.days.filter(d => d.usage === "partial").map(d => d.label.toLowerCase());
   document.getElementById("fcNote").textContent =
@@ -629,6 +639,86 @@ function renderForecast() {
   }
 }
 const kwh1 = n => n.toFixed(1) + " kWh";
+
+function renderSankey() {
+  const f = lastForecast, q = f.quotes[document.getElementById("fcQuote").value];
+  const s = q.scenarios[document.getElementById("fcScenario").value];
+  const date = f.days[document.getElementById("skDay").value].date;
+  drawSankey(s.days.find(d => d.date === date));
+}
+
+function drawSankey(d) {
+  const svg = document.getElementById("skChart"), NS = "http://www.w3.org/2000/svg";
+  svg.replaceChildren();
+  const el = (tag, attrs, text, parent = svg) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text) e.textContent = text; parent.append(e); return e; };
+  const v = k => d[k] || 0;
+  const solarExport = Math.max(0, v("pv") - v("direct") - v("solar_charge") - v("ev_solar") - v("curtailed"));
+  const battExport = Math.max(0, v("export") - solarExport);
+  document.getElementById("skTotal").textContent = `home usage ${kwh1(v("load"))}`;
+  const left = [
+    { id: "solar", name: "Solar", colour: "#ffd600" }, { id: "battery", name: "Battery", colour: "#4de0d0" },
+    { id: "grid", name: "Grid", colour: "#5b8cff" }];
+  const right = [
+    { id: "charge", name: "Battery", colour: "#5aabab" }, { id: "load", name: "Load", colour: "#a56bf0" },
+    { id: "export", name: "Grid", colour: "#5b5bf5" }, { id: "ev", name: "EV", colour: "#12b5cb" },
+    { id: "curtailed", name: "Curtailed", colour: "#c0c0c0" }];
+  const links = [
+    ["solar", "charge", v("solar_charge")], ["solar", "load", v("direct")], ["solar", "export", solarExport],
+    ["solar", "ev", v("ev_solar")], ["solar", "curtailed", v("curtailed")],
+    ["battery", "load", v("discharge")], ["battery", "export", battExport],
+    ["grid", "charge", v("grid_charge")], ["grid", "load", Math.max(0, v("import") - v("grid_charge"))]]
+    .filter(l => l[2] > 0.005).map(([s, t, val]) => ({ s, t, val }));
+  const sized = (side, key) => side.map(n => ({ ...n, size: links.filter(l => l[key] === n.id).reduce((a, l) => a + l.val, 0) }))
+    .filter(n => n.size > 0.005);
+  const L = sized(left, "s"), R = sized(right, "t");
+  if (!L.length) return;
+
+  const W = 760, H = 460, T = 6, BW = 150, GAP = 8, PH = H - 2 * T;
+  const total = side => side.reduce((a, n) => a + n.size, 0);
+  const scale = Math.min((PH - GAP * (L.length - 1)) / total(L), (PH - GAP * (R.length - 1)) / total(R));
+  const place = (side, x) => { let y = T; side.forEach(n => { n.x = x; n.y = n.cur = y; n.h = n.size * scale; y += n.h + GAP; }); };
+  place(L, 0); place(R, W - BW);
+  const byId = side => Object.fromEntries(side.map(n => [n.id, n]));
+  const li = byId(L), ri = byId(R);
+  links.forEach(l => { l.h = l.val * scale; });
+  [...links].sort((a, b) => R.indexOf(ri[a.t]) - R.indexOf(ri[b.t])).forEach(l => { l.y1 = li[l.s].cur; li[l.s].cur += l.h; });
+  [...links].sort((a, b) => L.indexOf(li[a.s]) - L.indexOf(li[b.s])).forEach(l => { l.y2 = ri[l.t].cur; ri[l.t].cur += l.h; });
+
+  const defs = el("defs", {});
+  links.forEach((l, i) => {
+    const g = el("linearGradient", { id: `skg${i}` }, "", defs);
+    el("stop", { offset: "0", "stop-color": li[l.s].colour }, "", g);
+    el("stop", { offset: "1", "stop-color": ri[l.t].colour }, "", g);
+    const x1 = BW, x2 = W - BW, xm = (x1 + x2) / 2;
+    const path = el("path", {
+      d: `M${x1},${l.y1} C${xm},${l.y1} ${xm},${l.y2} ${x2},${l.y2} L${x2},${l.y2 + l.h} C${xm},${l.y2 + l.h} ${xm},${l.y1 + l.h} ${x1},${l.y1 + l.h} Z`,
+      fill: `url(#skg${i})`, "fill-opacity": 0.6 });
+    el("title", {}, `${li[l.s].name} \u2192 ${ri[l.t].name}: ${l.val.toFixed(2)} kWh`, path);
+  });
+
+  const txt = (x, y, s, size, weight = 400) => el("text", { x, y, style: `font-size:${size}px;font-weight:${weight};fill:#1d2433` }, s);
+  const block = (n, sideTotal) => {
+    const pct = (100 * n.size / sideTotal).toFixed(1) + "%", value = n.size.toFixed(2);
+    el("rect", { x: n.x, y: n.y, width: BW, height: Math.max(n.h, 1), rx: 14, fill: n.colour });
+    if (n.h >= 110) {
+      const pw = n.name.length * 9 + 22;
+      el("rect", { x: n.x + 10, y: n.y + 10, width: pw, height: 24, rx: 8, fill: "#fff", "fill-opacity": 0.65 });
+      txt(n.x + 21, n.y + 27, n.name.toUpperCase(), 13, 600);
+      txt(n.x + 12, n.y + 66, value, 28, 700);
+      txt(n.x + 12, n.y + 86, "kWh", 13);
+      txt(n.x + 12, n.y + n.h - 12, pct, 15);
+    } else if (n.h >= 56) {
+      const pw = n.name.length * 9 + 22;
+      el("rect", { x: n.x + 10, y: n.y + 8, width: pw, height: 24, rx: 8, fill: "#fff", "fill-opacity": 0.65 });
+      txt(n.x + 21, n.y + 25, n.name.toUpperCase(), 13, 600);
+      txt(n.x + 12, n.y + n.h - 10, `${value} kWh \u00b7 ${pct}`, 14, 600);
+    } else if (n.h >= 20) {
+      txt(n.x + 12, n.y + n.h / 2 + 5, `${n.name.toUpperCase()} ${value} kWh`, 13, 600);
+    }
+  };
+  L.forEach(n => block(n, total(L)));
+  R.forEach(n => block(n, total(R)));
+}
 
 function drawForecast(days, s, capacity) {
   const svg = document.getElementById("fcChart"), NS = "http://www.w3.org/2000/svg";

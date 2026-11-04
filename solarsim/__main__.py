@@ -30,7 +30,7 @@ def main() -> None:
         from .web import main as web_main
         web_main()
         return
-    store = Database(os.environ["COSMOS_ENDPOINT"], os.environ.get("COSMOS_DATABASE", "solarsim")).for_user(service.LOCAL_USER)
+    store = Database(os.environ["COSMOS_ENDPOINT"], os.environ.get("COSMOS_DATABASE", "solarsim")).for_user(service.local_user())
     if args.cmd == "fetch-usage":
         print(service.fetch_consumption(store, args.days))
         return

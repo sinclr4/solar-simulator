@@ -14,6 +14,11 @@ from .model import LOCAL_TZ, SLOT_H, Strategy, System, Tariff, annualise, build_
 from .store import Store
 
 LOCAL_USER = "local"
+
+
+def local_user() -> str:
+    """The Cosmos user that local (not signed-in) runs act as; set LOCAL_USER_ID to reuse a deployed user's data."""
+    return os.environ.get("LOCAL_USER_ID") or LOCAL_USER
 ORIENTATIONS = {"east_west": "East / West", "south": "North / South (panels on south face)"}
 QUOTE_FIELDS = ("name", "solar_kwp", "battery_kwh", "battery_kw", "round_trip_eff", "export_limit_kw", "cost_gbp")
 MAX_QUOTES = 6
@@ -26,7 +31,7 @@ STRATEGIES = [
 TYPICAL_DAYS = 56
 FORECAST_LABELS = ("Two days ago", "Yesterday", "Today")
 FORECAST_FLOWS = ("load", "pv", "solar_charge", "grid_charge", "discharge", "import", "export", "ev_solar")
-FORECAST_TOTALS = ("load", "pv", "solar_charge", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving")
+FORECAST_TOTALS = ("load", "pv", "solar_charge", "direct", "discharge", "ev_solar", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving")
 
 
 @dataclass
@@ -120,13 +125,17 @@ OCTOPUS_DOC = "octopus"
 
 def _octopus_details(store: Store) -> dict | None:
     doc = store.get("settings", OCTOPUS_DOC)
-    if doc:
-        return {"api_key": credentials.decrypt(doc["api_key_enc"]), "account": doc["account"], "mpan": doc["mpan"]}
-    # A developer running locally may still keep their details in .env; never done for signed-in web users
+    # A developer running locally may keep their details in .env; never done for signed-in web users
     env = {k: os.environ.get(f"OCTOPUS_{k.upper()}") for k in ("api_key", "account", "mpan")}
-    if store.user_id == LOCAL_USER and all(env.values()):
-        return env
-    return None
+    local_env = store.user_id == local_user() and all(env.values())
+    if doc:
+        try:
+            return {"api_key": credentials.decrypt(doc["api_key_enc"]), "account": doc["account"], "mpan": doc["mpan"]}
+        except ValueError:
+            # The deployed app's encryption key isn't available locally
+            if not local_env:
+                raise
+    return env if local_env else None
 
 
 def octopus_status(store: Store) -> dict:
@@ -167,7 +176,11 @@ def _live_rows(env: dict) -> tuple[pd.Timestamp, list[dict], str | None]:
 
 def refresh_recent(store: Store) -> None:
     """Bring the last two days and today up to date; silently keeps stored data if Octopus is unavailable."""
-    env = _octopus_details(store)
+    env = None
+    try:
+        env = _octopus_details(store)
+    except ValueError:
+        pass
     if env:
         _store_rows(store, _live_rows(env)[1])
 

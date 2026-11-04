@@ -45,7 +45,7 @@ def identify_user():
     elif credentials.IN_AZURE:
         abort(401)
     else:
-        g.user_id, g.user_name = service.LOCAL_USER, "Local development"
+        g.user_id, g.user_name = service.local_user(), "Local development"
     if request.method in ("POST", "PUT", "DELETE") and request.headers.get("X-Solar-Client") != "1":
         abort(400)
 
@@ -94,7 +94,7 @@ def guide():
 
 @app.get("/api/me")
 def me():
-    return jsonify(name=g.user_name, local=g.user_id == service.LOCAL_USER)
+    return jsonify(name=g.user_name, local=g.user_id == service.local_user())
 
 
 @app.get("/api/octopus")
