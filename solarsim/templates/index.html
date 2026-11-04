@@ -158,9 +158,9 @@
   </section>
 
   <section class="card" id="forecastCard">
-    <h2>Yesterday, today &amp; tomorrow</h2>
-    <p class="muted">Forecast solar for your roof against your usage, showing what each quote's solar and battery would do across the three days. It uses the roof, tariff and quote settings above.</p>
-    <p class="row"><button type="button" id="forecastBtn">Show 3-day forecast</button><span id="forecastStatus" class="muted" aria-live="polite"></span></p>
+    <h2>Today, yesterday &amp; the day before</h2>
+    <p class="muted">Modelled solar for your roof against your usage, showing what each quote's solar and battery would do across the last three days. It uses the roof, tariff and quote settings above.</p>
+    <p class="row"><button type="button" id="forecastBtn">Show last 3 days</button><span id="forecastStatus" class="muted" aria-live="polite"></span></p>
     <div id="forecastOut" class="hidden">
       <div class="row">
         <div><label for="fcQuote">Quote</label><select id="fcQuote"></select></div>
@@ -604,9 +604,11 @@ function renderForecast() {
   const s = q.scenarios[document.getElementById("fcScenario").value];
   drawForecast(f.days, s, q.battery_kwh);
   const est = f.days.filter(d => d.usage === "estimated").map(d => d.label.toLowerCase());
+  const part = f.days.filter(d => d.usage === "partial").map(d => d.label.toLowerCase());
   document.getElementById("fcNote").textContent =
     (est.length ? `Usage for ${est.join(", ")} is estimated from your average for that weekday over the last 8 weeks, because actual readings are not available yet. ` : "") +
-    "Solar is the Open-Meteo forecast (modelled for yesterday). The shaded band is the 23:30–05:30 off-peak window. A day's bill includes the 23:30–midnight grid charge that is stored for the next day, so compare the 3-day total; battery stored (dashed) uses the right-hand axis and starts empty at the beginning of yesterday.";
+    (part.length ? `Usage for ${part.join(", ")} uses actual readings so far, with the rest estimated. ` : "") +
+    "Solar is the Open-Meteo modelled irradiance. The shaded band is the 23:30–05:30 off-peak window. A day's bill includes the 23:30–midnight grid charge that is stored for the next day, so compare the 3-day total; battery stored (dashed) uses the right-hand axis and starts empty at the beginning of two days ago.";
 
   const rows = [
     ["Usage", d => kwh1(d.load)], ["Solar generated", d => kwh1(d.pv)],

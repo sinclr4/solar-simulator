@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
+import requests
 from dateutil.relativedelta import relativedelta
 
 from . import credentials, octopus, weather
@@ -23,7 +24,7 @@ STRATEGIES = [
     Strategy("Full off-peak charge, sell surplus at export rate", grid_charge=True, export_arbitrage=True),
 ]
 TYPICAL_DAYS = 56
-FORECAST_LABELS = ("Yesterday", "Today", "Tomorrow")
+FORECAST_LABELS = ("Two days ago", "Yesterday", "Today")
 FORECAST_FLOWS = ("load", "pv", "solar_charge", "grid_charge", "discharge", "import", "export", "ev_solar")
 FORECAST_TOTALS = ("load", "pv", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving")
 
@@ -160,8 +161,21 @@ def fetch_consumption(store: Store, days: int) -> dict:
     serials = octopus.fetch_meter_serials(env["api_key"], env["account"], env["mpan"])
     rows = [r for s in serials for r in octopus.fetch_consumption(
         env["api_key"], env["mpan"], s, start.isoformat(), end.isoformat())]
+
+    # The REST API lags behind the meter, so the last two days and today come from live smart meter telemetry
+    live_start = end - pd.Timedelta(days=2)
+    now = pd.Timestamp.now(tz="UTC")
+    live_error = None
+    try:
+        live = octopus.fetch_live_consumption(env["api_key"], env["account"], env["mpan"],
+                                              live_start.isoformat(), now.isoformat())
+    except (requests.RequestException, ValueError) as e:
+        live, live_error = [], str(e)
+    live = [r for r in live if pd.Timestamp(r["interval_start"]) + pd.Timedelta(minutes=30) <= now]
+    if live:
+        rows = [r for r in rows if pd.Timestamp(r["interval_start"]) < live_start] + live
     if not rows:
-        return {"fetched_days": 0, **data_status(store)}
+        return {"fetched_days": 0, "live_error": live_error, **data_status(store)}
     cons = pd.DataFrame(rows)
     cons["start"] = pd.to_datetime(cons["interval_start"], utc=True)
     cons = cons.drop_duplicates("start", keep="first").sort_values("start")
@@ -176,7 +190,7 @@ def fetch_consumption(store: Store, days: int) -> dict:
         "slots": [{"start": s.isoformat(), "kwh": k} for s, k in zip(g["start"], g["consumption"])],
     } for d, g in cons.groupby("date")]
     store.upsert("consumption", docs)
-    return {"fetched_days": len(docs), **data_status(store)}
+    return {"fetched_days": len(docs), "live_slots": len(live), "live_error": live_error, **data_status(store)}
 
 
 def ensure_solar(store: Store, start: pd.Timestamp, end: pd.Timestamp, tilt: float) -> list[dict]:
@@ -277,8 +291,9 @@ def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple
     history = [d for d in docs if d["date"] < first.isoformat()]
     if not history:
         raise ValueError("No usage data stored - fetch usage data first")
-    actual = {pd.Timestamp(s["start"]): s["kwh"] for d in docs if d["date"] >= first.isoformat() for s in d["slots"]}
-    actual_days = {d["date"] for d in docs if d["date"] >= first.isoformat() and len(d["slots"]) >= 46}
+    recent = [d for d in docs if d["date"] >= first.isoformat()]
+    actual = {pd.Timestamp(s["start"]): s["kwh"] for d in recent for s in d["slots"]}
+    day_slots = {d["date"]: len(d["slots"]) for d in recent}
 
     past = pd.Series({pd.Timestamp(s["start"]): s["kwh"] for d in history for s in d["slots"]})
     past_local = past.index.tz_convert(LOCAL_TZ)
@@ -294,20 +309,20 @@ def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple
         return overall.get(hm)
 
     local = slots.tz_convert(LOCAL_TZ)
-    values, sources = [], {}
-    for ts, lt in zip(slots, local):
-        day = lt.strftime("%Y-%m-%d")
-        sources[day] = "actual" if day in actual_days else "estimated"
-        values.append(actual.get(ts, typical_for(lt)) if day in actual_days else typical_for(lt))
-    return pd.Series(values, index=slots), [sources[d.isoformat()] for d in days]
+    values = [actual[ts] if ts in actual else typical_for(lt) for ts, lt in zip(slots, local)]
+
+    def source(day: date) -> str:
+        n = day_slots.get(day.isoformat(), 0)
+        return "actual" if n >= 46 else "partial" if n else "estimated"
+    return pd.Series(values, index=slots), [source(d) for d in days]
 
 
 def forecast(store: Store, body: dict) -> dict:
-    """Yesterday, today and tomorrow: forecast solar against usage, run through each quote's battery."""
+    """Two days ago, yesterday and today: solar against usage, run through each quote's battery."""
     inputs = _parse_quotes(body)
     base = inputs[0]
     today = pd.Timestamp.now(tz=LOCAL_TZ).date()
-    days = [today + timedelta(days=i) for i in (-1, 0, 1)]
+    days = [today + timedelta(days=i) for i in (-2, -1, 0)]
     start = pd.Timestamp(days[0]).tz_localize(LOCAL_TZ)
     end = pd.Timestamp(days[-1] + timedelta(days=1)).tz_localize(LOCAL_TZ)
     slots = pd.date_range(start, end, freq="30min", inclusive="left").tz_convert("UTC")

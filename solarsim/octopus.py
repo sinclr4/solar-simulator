@@ -33,6 +33,47 @@ def fetch_meter_serials(api_key: str, account: str, mpan: str) -> list[str]:
             if mp["mpan"] == mpan for m in mp["meters"]]
 
 
+GRAPHQL_URL = f"{BASE_URL}/v1/graphql/"
+
+_TOKEN_QUERY = "mutation($key: String!) { obtainKrakenToken(input: {APIKey: $key}) { token } }"
+_DEVICES_QUERY = """query($account: String!) {
+  account(accountNumber: $account) {
+    electricityAgreements(active: true) {
+      meterPoint { mpan meters(includeInactive: false) { smartDevices { deviceId } } }
+    }
+  }
+}"""
+_TELEMETRY_QUERY = """query($deviceId: String!, $start: DateTime, $end: DateTime, $grouping: TelemetryGrouping) {
+  smartMeterTelemetry(deviceId: $deviceId, start: $start, end: $end, grouping: $grouping) {
+    readAt consumptionDelta
+  }
+}"""
+
+
+def _graphql(query: str, variables: dict, token: str | None = None) -> dict:
+    r = requests.post(GRAPHQL_URL, json={"query": query, "variables": variables},
+                      headers={"Authorization": token} if token else None, timeout=60)
+    r.raise_for_status()
+    body = r.json()
+    if body.get("errors"):
+        raise ValueError(body["errors"][0].get("message", "Octopus GraphQL request failed"))
+    return body["data"]
+
+
+def fetch_live_consumption(api_key: str, account: str, mpan: str, start: str, end: str) -> list[dict]:
+    """Half-hourly smart meter telemetry as REST-style rows (kWh); empty if the meter has no live data."""
+    token = _graphql(_TOKEN_QUERY, {"key": api_key})["obtainKrakenToken"]["token"]
+    agreements = _graphql(_DEVICES_QUERY, {"account": account}, token)["account"]["electricityAgreements"]
+    device_ids = [d["deviceId"] for a in agreements if a["meterPoint"]["mpan"] == mpan
+                  for m in a["meterPoint"]["meters"] for d in m["smartDevices"] or [] if d.get("deviceId")]
+    if not device_ids:
+        return []
+    data = _graphql(_TELEMETRY_QUERY, {"deviceId": device_ids[0], "start": start, "end": end,
+                                       "grouping": "HALF_HOURLY"}, token)
+    return [{"interval_start": t["readAt"], "consumption": float(t["consumptionDelta"]) / 1000}
+            for t in data["smartMeterTelemetry"] or [] if t["consumptionDelta"] is not None]
+
+
 def fetch_consumption(api_key: str, mpan: str, serial: str, period_from: str, period_to: str) -> list[dict]:
     url = f"{BASE_URL}/v1/electricity-meter-points/{mpan}/meters/{serial}/consumption/"
     params = {"period_from": period_from, "period_to": period_to,
