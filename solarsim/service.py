@@ -26,7 +26,7 @@ STRATEGIES = [
 TYPICAL_DAYS = 56
 FORECAST_LABELS = ("Two days ago", "Yesterday", "Today")
 FORECAST_FLOWS = ("load", "pv", "solar_charge", "grid_charge", "discharge", "import", "export", "ev_solar")
-FORECAST_TOTALS = ("load", "pv", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving")
+FORECAST_TOTALS = ("load", "pv", "solar_charge", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving")
 
 
 @dataclass
@@ -153,6 +153,25 @@ def delete_octopus(store: Store) -> None:
     store.delete("settings", OCTOPUS_DOC)
 
 
+def _live_rows(env: dict) -> tuple[pd.Timestamp, list[dict], str | None]:
+    """Completed half-hours from live smart meter telemetry for the last two days and today."""
+    live_start = _window(0)[1] - pd.Timedelta(days=2)
+    now = pd.Timestamp.now(tz="UTC")
+    try:
+        live = octopus.fetch_live_consumption(env["api_key"], env["account"], env["mpan"],
+                                              live_start.isoformat(), now.isoformat())
+    except (requests.RequestException, ValueError) as e:
+        return live_start, [], str(e)
+    return live_start, [r for r in live if pd.Timestamp(r["interval_start"]) + pd.Timedelta(minutes=30) <= now], None
+
+
+def refresh_recent(store: Store) -> None:
+    """Bring the last two days and today up to date; silently keeps stored data if Octopus is unavailable."""
+    env = _octopus_details(store)
+    if env:
+        _store_rows(store, _live_rows(env)[1])
+
+
 def fetch_consumption(store: Store, days: int) -> dict:
     start, end = _window(days)
     env = _octopus_details(store)
@@ -162,20 +181,18 @@ def fetch_consumption(store: Store, days: int) -> dict:
     rows = [r for s in serials for r in octopus.fetch_consumption(
         env["api_key"], env["mpan"], s, start.isoformat(), end.isoformat())]
 
-    # The REST API lags behind the meter, so the last two days and today come from live smart meter telemetry
-    live_start = end - pd.Timedelta(days=2)
-    now = pd.Timestamp.now(tz="UTC")
-    live_error = None
-    try:
-        live = octopus.fetch_live_consumption(env["api_key"], env["account"], env["mpan"],
-                                              live_start.isoformat(), now.isoformat())
-    except (requests.RequestException, ValueError) as e:
-        live, live_error = [], str(e)
-    live = [r for r in live if pd.Timestamp(r["interval_start"]) + pd.Timedelta(minutes=30) <= now]
+    # The REST API lags behind the meter, so the last two days and today come from live telemetry
+    live_start, live, live_error = _live_rows(env)
     if live:
         rows = [r for r in rows if pd.Timestamp(r["interval_start"]) < live_start] + live
+    return {"fetched_days": _store_rows(store, rows), "live_slots": len(live), "live_error": live_error,
+            **data_status(store)}
+
+
+def _store_rows(store: Store, rows: list[dict]) -> int:
+    """Group half-hourly rows into one document per local day and save them; returns the number of days."""
     if not rows:
-        return {"fetched_days": 0, "live_error": live_error, **data_status(store)}
+        return 0
     cons = pd.DataFrame(rows)
     cons["start"] = pd.to_datetime(cons["interval_start"], utc=True)
     cons = cons.drop_duplicates("start", keep="first").sort_values("start")
@@ -190,7 +207,7 @@ def fetch_consumption(store: Store, days: int) -> dict:
         "slots": [{"start": s.isoformat(), "kwh": k} for s, k in zip(g["start"], g["consumption"])],
     } for d, g in cons.groupby("date")]
     store.upsert("consumption", docs)
-    return {"fetched_days": len(docs), "live_slots": len(live), "live_error": live_error, **data_status(store)}
+    return len(docs)
 
 
 def ensure_solar(store: Store, start: pd.Timestamp, end: pd.Timestamp, tilt: float) -> list[dict]:
@@ -283,7 +300,7 @@ def _run_quote(store: Store, unit: pd.DataFrame, inp: Inputs, tariff: Tariff, ru
     return {"name": inp.name, **{k: getattr(inp, k) for k in QUOTE_FIELDS}, "scenarios": scenarios}
 
 
-def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple[pd.Series, list[str]]:
+def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple[pd.Series, list[str], list[float]]:
     """Actual stored usage for each day where available, otherwise the average for the same weekday over the last 8 weeks."""
     first = days[0]
     docs = store.by_date("consumption", (first - timedelta(days=TYPICAL_DAYS)).isoformat(),
@@ -314,20 +331,22 @@ def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple
     def source(day: date) -> str:
         n = day_slots.get(day.isoformat(), 0)
         return "actual" if n >= 46 else "partial" if n else "estimated"
-    return pd.Series(values, index=slots), [source(d) for d in days]
+    actual_kwh = [sum(v for ts, lt, v in zip(slots, local, values) if ts in actual and lt.date() == d) for d in days]
+    return pd.Series(values, index=slots), [source(d) for d in days], actual_kwh
 
 
 def forecast(store: Store, body: dict) -> dict:
     """Two days ago, yesterday and today: solar against usage, run through each quote's battery."""
     inputs = _parse_quotes(body)
     base = inputs[0]
+    refresh_recent(store)
     today = pd.Timestamp.now(tz=LOCAL_TZ).date()
     days = [today + timedelta(days=i) for i in (-2, -1, 0)]
     start = pd.Timestamp(days[0]).tz_localize(LOCAL_TZ)
     end = pd.Timestamp(days[-1] + timedelta(days=1)).tz_localize(LOCAL_TZ)
     slots = pd.date_range(start, end, freq="30min", inclusive="left").tz_convert("UTC")
 
-    usage, sources = _three_day_usage(store, days, slots)
+    usage, sources, actual_kwh = _three_day_usage(store, days, slots)
     faces = base.faces()
     irradiance = weather.fetch_forecast_faces(base.tilt, [f for f, w in faces.items() if w])
     solar_docs = [{"hourly": [{"end": t.isoformat(), **row} for t, row in irradiance.to_dict(orient="index").items()]}]
@@ -362,5 +381,5 @@ def forecast(store: Store, body: dict) -> dict:
             })
         quotes.append({"name": inp.name, "battery_kwh": inp.battery_kwh, "scenarios": scenarios})
 
-    return {"days": [{"date": d.isoformat(), "label": lbl, "usage": src}
-                     for d, lbl, src in zip(days, FORECAST_LABELS, sources)], "quotes": quotes}
+    return {"days": [{"date": d.isoformat(), "label": lbl, "usage": src, "actual_kwh": round(act, 2)}
+                     for d, lbl, src, act in zip(days, FORECAST_LABELS, sources, actual_kwh)], "quotes": quotes}
