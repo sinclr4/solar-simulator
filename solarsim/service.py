@@ -31,7 +31,8 @@ TYPICAL_DAYS = 56
 HISTORY_DAYS = 30  # days of dispatch the energy-flow chart can show
 FORECAST_FLOWS = ("load", "pv", "solar_charge", "grid_charge", "discharge", "import", "export", "ev_solar")
 FORECAST_TOTALS = ("load", "pv", "solar_charge", "direct", "discharge", "ev_solar", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving",
-                   "bmw_direct", "bmw_discharge", "bmw_grid_house", "oev_direct", "oev_discharge", "oev_grid_house")
+                   "bmw_direct", "bmw_discharge", "bmw_grid_house", "oev_direct", "oev_discharge", "oev_grid_house",
+                   "cost_charge", "cost_bmw", "cost_oev", "cost_load", "income_export")
 
 
 @dataclass
@@ -545,6 +546,13 @@ def forecast(store: Store, body: dict) -> dict:
             r["oev_direct"] = r["direct"].where(window, 0.0)
             r["oev_discharge"] = r["discharge"].where(window, 0.0)
             r["oev_grid_house"] = (r["ev_grid"] - bmw_part).where(~window, house_grid)
+            # Grid energy is billed at the slot's rate, so each use's cost is its grid kWh times that rate
+            rate = r["cheap"].map({True: tariff.offpeak_p, False: tariff.peak_p}) / 100
+            r["cost_charge"] = r["grid_charge"] * rate
+            r["cost_bmw"] = r["bmw_grid_house"] * rate
+            r["cost_oev"] = r["oev_grid_house"] * rate
+            r["cost_load"] = (house_grid - r["bmw_grid_house"] - r["oev_grid_house"]) * rate
+            r["income_export"] = r["export"] * tariff.export_p / 100
             local = r.index.tz_convert(LOCAL_TZ)
             totals = r[list(FORECAST_TOTALS)].groupby(local.strftime("%Y-%m-%d")).sum().round(2)
             flows = r[list(FORECAST_FLOWS)] / SLOT_H

@@ -171,8 +171,9 @@
       <div style="overflow-x:auto;margin-top:.75rem"><table id="fcTable"></table></div>
       <h3 style="margin-top:1.25rem">Energy flow <span id="skTotal" class="muted" style="font-weight:normal"></span></h3>
       <div class="row"><div><label for="skDay">Day or period</label><select id="skDay"></select></div></div>
+      <div id="skCost" style="display:flex;flex-wrap:wrap;gap:.75rem;margin:.75rem 0"></div>
       <svg id="skChart" viewBox="0 0 760 460" width="100%" role="img" aria-label="Energy flow for the selected day" style="display:block;margin:.5rem auto 0;max-width:760px"></svg>
-      <p class="muted">Left: where the energy came from. Right: where it went. Each ribbon shows how much of a source went to each use. "Home battery" is what the battery was charged with. "BMW" is your BMW's recorded charging, and "Porsche" is any further EV charging Octopus saw (on days BMW data isn't available it is the usage between 23:30 and 05:30 plus Octopus's EV readings). "Load" is everything else. "Battery" on the left is what the battery gave back (to the house or sold), so the gap between it and battery charging is round-trip loss plus any change in stored energy. "Grid" on the right is export.</p>
+      <p class="muted">Left: where the energy came from. Right: where it went. Each ribbon shows how much of a source went to each use. "Home battery" is what the battery was charged with. "BMW" is your BMW's recorded charging, and "Porsche" is any further EV charging Octopus saw (on days BMW data isn't available it is the usage between 23:30 and 05:30 plus Octopus's EV readings). "Load" is everything else. "Battery" on the left is what the battery gave back (to the house or sold), so the gap between it and battery charging is round-trip loss plus any change in stored energy. "Grid" on the right is export. The £ figures are what that use cost to buy from the grid at its half-hour rate (smart-charging slots are billed at the off-peak rate), so solar and battery energy are free here and the battery's own cost shows under "Home battery". Export shows what it earned. "Actual cost" is the usage priced at your tariff with no solar or battery, so it is modelled from your half-hourly usage rather than taken from a bill; "New cost" is the grid cost above minus the export income.</p>
     </div>
   </section>
 </main>
@@ -662,26 +663,44 @@ function drawSankey(d) {
   const v = k => d[k] || 0;
   const solarExport = Math.max(0, v("pv") - v("direct") - v("solar_charge") - v("ev_solar") - v("curtailed"));
   const battExport = Math.max(0, v("export") - solarExport);
+  const gridCost = v("cost_charge") + v("cost_bmw") + v("cost_oev") + v("cost_load");
   document.getElementById("skTotal").textContent = `home usage ${kwh1(v("load"))}`;
+  const costBox = document.getElementById("skCost"), saving = v("cost_before") - v("cost_after");
+  costBox.replaceChildren(...[
+    ["Actual cost (no solar or battery)", gbp2(v("cost_before")), ""],
+    ["New cost (solar + battery)", gbp2(v("cost_after")), ""],
+    [saving >= 0 ? "Saving" : "Extra cost", gbp2(Math.abs(saving)), saving >= 0 ? "var(--ok)" : "var(--bad)"],
+  ].map(([label, value, colour]) => {
+    const box = document.createElement("div"), lab = document.createElement("div"), val = document.createElement("div");
+    box.style.cssText = "border:1px solid #ddd;border-radius:8px;padding:.5rem .9rem;min-width:11rem";
+    lab.className = "muted"; lab.style.fontSize = ".85rem"; lab.textContent = label;
+    val.style.cssText = `font-size:1.4rem;font-weight:700;${colour ? `color:${colour}` : ""}`; val.textContent = value;
+    box.append(lab, val);
+    return box;
+  }));
   const left = [
     { id: "solar", name: "Solar", icon: "☀️", colour: "#ffd600" }, { id: "battery", name: "Battery", icon: "🔋", colour: "#4de0d0" },
-    { id: "grid", name: "Grid", icon: "⚡", colour: "#5b8cff" }];
+    { id: "grid", name: "Grid", icon: "⚡", colour: "#5b8cff", costText: gbp2(gridCost) }];
   const right = [
-    { id: "charge", name: "Home battery", icon: "🔋", colour: "#5aabab" }, { id: "bmw", name: "BMW", icon: "", logo: "bmw", colour: "#1c69d4" },
-    { id: "oev", name: "Porsche", icon: "", logo: "porsche", colour: "#c8102e" }, { id: "load", name: "Load", icon: "🏠", colour: "#a56bf0" },
-    { id: "export", name: "Grid", icon: "⚡", colour: "#5b5bf5" }, { id: "ev", name: "EV (solar)", icon: "🚗", colour: "#12b5cb" },
+    { id: "charge", name: "Home battery", icon: "🔋", colour: "#5aabab", costText: gbp2(v("cost_charge")) },
+    { id: "bmw", name: "BMW", icon: "", logo: "bmw", hideName: true, colour: "#1c69d4", costText: gbp2(v("cost_bmw")) },
+    { id: "oev", name: "Porsche", icon: "", logo: "porsche", hideName: true, colour: "#c8102e", costText: gbp2(v("cost_oev")) },
+    { id: "load", name: "Load", icon: "🏠", colour: "#a56bf0", costText: gbp2(v("cost_load")) },
+    { id: "export", name: "Grid", icon: "⚡", colour: "#5b5bf5", costText: `+${gbp2(v("income_export"))}` },
+    { id: "ev", name: "EV (solar)", icon: "🚗", colour: "#12b5cb" },
     { id: "curtailed", name: "Curtailed", icon: "🚫", colour: "#c0c0c0" }];
   const gridHouse = Math.max(0, v("import") - v("grid_charge"));
   const used = src => ["bmw", "oev"].map(p => v(`${p}_${src}`)).reduce((a, b) => a + b, 0);
+  const exportAll = Math.max(solarExport + battExport, 1e-9), earned = x => v("income_export") * x / exportAll;
   const links = [
     ["solar", "charge", v("solar_charge")], ["solar", "bmw", v("bmw_direct")], ["solar", "oev", v("oev_direct")],
-    ["solar", "load", v("direct") - used("direct")], ["solar", "export", solarExport], ["solar", "ev", v("ev_solar")],
+    ["solar", "load", v("direct") - used("direct")], ["solar", "export", solarExport, earned(solarExport)], ["solar", "ev", v("ev_solar")],
     ["solar", "curtailed", v("curtailed")],
     ["battery", "bmw", v("bmw_discharge")], ["battery", "oev", v("oev_discharge")],
-    ["battery", "load", v("discharge") - used("discharge")], ["battery", "export", battExport],
-    ["grid", "charge", v("grid_charge")], ["grid", "bmw", v("bmw_grid_house")], ["grid", "oev", v("oev_grid_house")],
-    ["grid", "load", gridHouse - used("grid_house")]]
-    .filter(l => l[2] > 0.005).map(([s, t, val]) => ({ s, t, val }));
+    ["battery", "load", v("discharge") - used("discharge")], ["battery", "export", battExport, earned(battExport)],
+    ["grid", "charge", v("grid_charge"), v("cost_charge")], ["grid", "bmw", v("bmw_grid_house"), v("cost_bmw")],
+    ["grid", "oev", v("oev_grid_house"), v("cost_oev")], ["grid", "load", gridHouse - used("grid_house"), v("cost_load")]]
+    .filter(l => l[2] > 0.005).map(([s, t, val, cost]) => ({ s, t, val, cost }));
   const sized = (side, key) => side.map(n => ({ ...n, size: links.filter(l => l[key] === n.id).reduce((a, l) => a + l.val, 0) }))
     .filter(n => n.size > 0.005);
   const L = sized(left, "s"), R = sized(right, "t");
@@ -707,57 +726,52 @@ function drawSankey(d) {
     const path = el("path", {
       d: `M${x1},${l.y1} C${xm},${l.y1} ${xm},${l.y2} ${x2},${l.y2} L${x2},${l.y2 + l.h} C${xm},${l.y2 + l.h} ${xm},${l.y1 + l.h} ${x1},${l.y1 + l.h} Z`,
       fill: `url(#skg${i})`, "fill-opacity": 0.6 });
-    el("title", {}, `${li[l.s].name} \u2192 ${ri[l.t].name}: ${l.val.toFixed(2)} kWh`, path);
+    el("title", {}, `${li[l.s].name} \u2192 ${ri[l.t].name}: ${l.val.toFixed(2)} kWh${l.cost == null ? "" : ` \u00b7 ${l.t === "export" ? "earns" : "costs"} ${gbp2(l.cost)}`}`, path);
   });
 
   const txt = (x, y, s, size, weight = 400) => el("text", { x, y, style: `font-size:${size}px;font-weight:${weight};fill:#1d2433` }, s);
-  // Simplified marks for the two cars, centred on (cx, cy) and s pixels tall
+  // Car logos, centred on (cx, cy) and s pixels tall
   const logos = {
     bmw(cx, cy, s) {
-      const r = s / 2, ri = r * 0.78, q = (a, b, c, d) => `M${cx},${cy} L${cx + a * ri},${cy + b * ri} A${ri},${ri} 0 0 1 ${cx + c * ri},${cy + d * ri} Z`;
-      el("circle", { cx, cy, r, fill: "#111" });
-      el("circle", { cx, cy, r: ri + 0.5, fill: "#fff" });
-      el("path", { d: q(-1, 0, 0, -1), fill: "#1c69d4" });
-      el("path", { d: q(0, -1, 1, 0), fill: "#fff" });
-      el("path", { d: q(1, 0, 0, 1), fill: "#1c69d4" });
-      el("path", { d: q(0, 1, -1, 0), fill: "#fff" });
+      el("image", { href: "/static/bmw.png", x: cx - s / 2, y: cy - s / 2, width: s, height: s });
     },
     porsche(cx, cy, s) {
-      const w = s * 0.82, h = s, x0 = cx - w / 2, y0 = cy - h / 2;
-      const shield = (k) => { const hw = w * k / 2, hh = h * k / 2;
-        return `M${cx - hw},${cy - hh} H${cx + hw} V${cy + hh * 0.1} Q${cx + hw},${cy + hh * 0.7} ${cx},${cy + hh} Q${cx - hw},${cy + hh * 0.7} ${cx - hw},${cy + hh * 0.1} Z`; };
-      const clip = el("clipPath", { id: `pc${logos.n = (logos.n || 0) + 1}` }, "", svg);
-      el("path", { d: shield(0.86) }, "", clip);
-      el("path", { d: shield(1), fill: "#c9a227" });
-      const g = el("g", { "clip-path": `url(#pc${logos.n})` });
-      const rect = (x, y, rw, rh, fill) => el("rect", { x, y, width: rw, height: rh, fill }, "", g);
-      rect(x0, y0, w, h, "#e8d28a");
-      for (let i = 0; i < 4; i++) { rect(x0, y0 + i * h * 0.12, w / 2, h * 0.06, "#d5001c"); rect(x0 + w / 2, y0 + h / 2 + i * h * 0.12, w / 2, h * 0.06, "#d5001c"); }
-      el("ellipse", { cx, cy, rx: w * 0.14, ry: h * 0.17, fill: "#111" }, "", g);
+      // The crest sits in the middle of a wide padded image, so crop to it
+      const w = s * 273 / 361;
+      const box = el("svg", { x: cx - w / 2, y: cy - s / 2, width: w, height: s, viewBox: "372 6 273 361" });
+      el("image", { href: "/static/porsche.png", width: 1024, height: 393 }, "", box);
     },
   };
   const mark = (n, cx, cy, s) => n.logo ? logos[n.logo](cx, cy, s) : el("text", { x: cx, y: cy + s * 0.35, "text-anchor": "middle", style: `font-size:${s}px` }, n.icon);
   const block = (n, sideTotal) => {
     const pct = (100 * n.size / sideTotal).toFixed(1) + "%", value = n.size.toFixed(2);
+    const label = n.hideName ? "" : `${n.icon} ${n.name.toUpperCase()}`.trim();
     el("rect", { x: n.x, y: n.y, width: BW, height: Math.max(n.h, 1), rx: 14, fill: n.colour });
     if (n.h >= 110) {
-      const pw = n.name.length * 9 + 22 + [...n.icon].length * 17;
-      el("rect", { x: n.x + 10, y: n.y + 10, width: pw, height: 24, rx: 8, fill: "#fff", "fill-opacity": 0.65 });
-      txt(n.x + 18, n.y + 27, `${n.icon} ${n.name.toUpperCase()}`, 13, 600);
-      txt(n.x + 12, n.y + 66, value, 28, 700);
-      txt(n.x + 12, n.y + 86, "kWh", 13);
-      txt(n.x + 12, n.y + n.h - 12, pct, 15);
-      mark(n, n.x + BW - 32, n.y + n.h - 34, 44);
+      if (label) {
+        const pw = n.name.length * 9 + 22 + [...n.icon].length * 17;
+        el("rect", { x: n.x + 10, y: n.y + 10, width: pw, height: 24, rx: 8, fill: "#fff", "fill-opacity": 0.65 });
+        txt(n.x + 18, n.y + 27, label, 13, 600);
+      }
+      txt(n.x + 12, n.y + (n.hideName ? 78 : 66), value, 28, 700);
+      txt(n.hideName ? n.x + 18 + value.length * 16 : n.x + 12, n.y + (n.hideName ? 78 : 86), "kWh", 13);
+      txt(n.x + 12, n.y + n.h - 12, n.costText ? `${pct} \u00b7 ${n.costText}` : pct, 15);
+      if (n.hideName) mark(n, n.x + 30, n.y + 28, 36);
+      else if (n.logo) mark(n, n.x + BW - 28, n.y + 64, 40);
+      else mark(n, n.x + BW - 20, n.y + 84, 26);
     } else if (n.h >= 56) {
-      const pw = n.name.length * 9 + 22 + [...n.icon].length * 17;
-      el("rect", { x: n.x + 10, y: n.y + 8, width: pw, height: 24, rx: 8, fill: "#fff", "fill-opacity": 0.65 });
-      txt(n.x + 18, n.y + 25, `${n.icon} ${n.name.toUpperCase()}`, 13, 600);
-      txt(n.x + 12, n.y + n.h - 10, `${value} kWh \u00b7 ${pct}`, 14, 600);
-      if (n.logo) mark(n, n.x + BW - 24, n.y + 20, 28);
+      if (label) {
+        const pw = n.name.length * 9 + 22 + [...n.icon].length * 17;
+        el("rect", { x: n.x + 10, y: n.y + 8, width: pw, height: 24, rx: 8, fill: "#fff", "fill-opacity": 0.65 });
+        txt(n.x + 18, n.y + 25, label, 13, 600);
+      }
+      const line = `${value} kWh \u00b7 ${n.costText || pct}`;
+      txt(n.x + 12, n.y + n.h - 10, line, line.length > 16 ? 12 : 14, 600);
+      if (n.logo) mark(n, n.hideName ? n.x + 24 : n.x + BW - 24, n.y + 20, 28);
     } else if (n.h >= 20) {
       const ls = n.logo ? Math.min(n.h - 2, 18) : 0;
       if (n.logo) mark(n, n.x + 12 + ls / 2, n.y + n.h / 2, ls);
-      txt(n.x + 12 + (n.logo ? ls + 6 : 0), n.y + n.h / 2 + 5, `${n.icon} ${n.name.toUpperCase()} ${value}${n.name.length + value.length > 12 ? "" : " kWh"}`.trimStart(), 13, 600);
+      txt(n.x + 12 + (n.logo ? ls + 6 : 0), n.y + n.h / 2 + 5, `${label} ${value}${n.name.length + value.length > 12 ? "" : " kWh"}`.trimStart(), 13, 600);
     }
   };
   L.forEach(n => block(n, total(L)));
