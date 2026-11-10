@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 from dateutil.relativedelta import relativedelta
 
-from . import credentials, octopus, weather
+from . import bmw, credentials, octopus, weather
 from .model import LOCAL_TZ, SLOT_H, Strategy, System, Tariff, annualise, build_frame, dispatch, payback, simulate
 from .store import Store
 
@@ -25,14 +25,13 @@ MAX_QUOTES = 6
 STRATEGIES = [
     Strategy("Solar + battery (charged from solar only)", grid_charge=False),
     Strategy("Solar + battery + off-peak grid charging", grid_charge=True),
-    Strategy("Grid charging + summer surplus to EV", grid_charge=True, ev_surplus=True),
     Strategy("Full off-peak charge, sell surplus at export rate", grid_charge=True, export_arbitrage=True),
 ]
 TYPICAL_DAYS = 56
-FORECAST_LABELS = ("Two days ago", "Yesterday", "Today")
+HISTORY_DAYS = 30  # days of dispatch the energy-flow chart can show
 FORECAST_FLOWS = ("load", "pv", "solar_charge", "grid_charge", "discharge", "import", "export", "ev_solar")
 FORECAST_TOTALS = ("load", "pv", "solar_charge", "direct", "discharge", "ev_solar", "import", "export", "grid_charge", "curtailed", "cost_before", "cost_after", "saving",
-                   "chg_direct", "chg_discharge", "chg_grid_house")
+                   "bmw_direct", "bmw_discharge", "bmw_grid_house", "oev_direct", "oev_discharge", "oev_grid_house")
 
 
 @dataclass
@@ -163,6 +162,118 @@ def delete_octopus(store: Store) -> None:
     store.delete("settings", OCTOPUS_DOC)
 
 
+BMW_DOC = "bmw"
+BMW_HISTORY_DAYS = 59  # BMW rejects a charging-history start older than about 60 days
+BMW_SYNC_MINUTES = 60  # CarData allows only 50 requests a day, so don't re-sync more often than this
+
+
+def _clean(doc: dict) -> dict:
+    return {k: v for k, v in doc.items() if not k.startswith("_")}
+
+
+def bmw_connect(store: Store, client_id: str, refresh_token: str) -> None:
+    old = _clean(store.get("settings", BMW_DOC) or {})
+    store.upsert("settings", [{**old, "id": BMW_DOC, "client_id": client_id,
+                               "refresh_token_enc": credentials.encrypt(refresh_token),
+                               "saved_at": datetime.now(timezone.utc).isoformat()}])
+
+
+def _bmw_update(store: Store, **changes) -> None:
+    store.upsert("settings", [{**_clean(store.get("settings", BMW_DOC)), **changes}])
+
+
+def _bmw_session(store: Store) -> tuple[str, dict]:
+    """A fresh access token plus the BMW settings document."""
+    doc = store.get("settings", BMW_DOC)
+    if not doc:
+        raise ValueError("Connect BMW first: python -m solarsim bmw-login --client-id <your CarData client ID>")
+    old = credentials.decrypt(doc["refresh_token_enc"])
+    tokens = bmw.refresh_tokens(doc["client_id"], old)
+    # BMW issues a new refresh token on every refresh, so keep it or the login lapses after two weeks
+    bmw_connect(store, doc["client_id"], tokens.get("refresh_token") or old)
+    return tokens["access_token"], doc
+
+
+def bmw_sessions(store: Store, days: int) -> list[dict]:
+    token, doc = _bmw_session(store)
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=min(days, BMW_HISTORY_DAYS))
+    return [{**s, "vin": vin} for vin in doc.get("vins") or bmw.mapped_vins(token)
+            for s in bmw.charging_sessions(token, vin, start, end)]
+
+
+def _bmw_day_docs(sessions: list[dict], first_full_date: str) -> list[dict]:
+    """One document per local day with BMW's half-hourly charging energy and that day's session summaries."""
+    slots: dict[str, dict[str, float]] = {}
+    infos: dict[str, list] = {}
+    seen = set()
+    for s in sessions:
+        if (s["vin"], s["startTime"]) in seen:
+            continue
+        seen.add((s["vin"], s["startTime"]))
+        t0 = pd.Timestamp(s["startTime"], unit="s", tz="UTC")
+        infos.setdefault(t0.tz_convert(LOCAL_TZ).strftime("%Y-%m-%d"), []).append({
+            "start": t0.isoformat(),
+            "end": pd.Timestamp(s["endTime"], unit="s", tz="UTC").isoformat() if s.get("endTime") else None,
+            "grid_kwh": round(s.get("energyConsumedFromPowerGridKwh") or 0.0, 2),
+            "soc_start": s.get("displayedStartSoc"), "soc_end": s.get("displayedSoc"),
+            "location": (s.get("chargingLocation") or {}).get("municipality"), "vin_ending": s["vin"][-4:]})
+        for epoch, kwh in bmw.session_slot_kwh(s).items():
+            t = pd.Timestamp(epoch, unit="s", tz="UTC")
+            day = slots.setdefault(t.tz_convert(LOCAL_TZ).strftime("%Y-%m-%d"), {})
+            day[t.isoformat()] = day.get(t.isoformat(), 0.0) + kwh
+    return [{"id": f"bmw-{d}", "date": d, "kind": "bmw", "sessions": infos.get(d, []),
+             "slots": [{"start": k, "kwh": round(v, 3)} for k, v in sorted(slots.get(d, {}).items())]}
+            for d in sorted(set(slots) | set(infos)) if d >= first_full_date]
+
+
+def sync_bmw(store: Store, force: bool = False) -> dict | None:
+    """Save recent BMW charging sessions; None if BMW isn't connected or was synced within the last hour."""
+    doc = store.get("settings", BMW_DOC)
+    if not doc:
+        return None
+    now = datetime.now(timezone.utc)
+    last = datetime.fromisoformat(doc["last_sync"]) if doc.get("last_sync") else None
+    if last and not force and now - last < timedelta(minutes=BMW_SYNC_MINUTES):
+        return None
+    token, doc = _bmw_session(store)
+    oldest = now - timedelta(days=BMW_HISTORY_DAYS)
+    since = oldest if force or not last else max(last - timedelta(days=3), oldest)
+    vins = doc.get("vins") or bmw.mapped_vins(token)
+    sessions = [{**s, "vin": v} for v in vins for s in bmw.charging_sessions(token, v, since, now)]
+    # The first day of a window is only partly covered, so leave whatever is already stored for it
+    first_full = (pd.Timestamp(since).tz_convert(LOCAL_TZ).normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    docs = _bmw_day_docs(sessions, first_full)
+    store.upsert("settings", docs)
+    continuous = last is not None and since <= last and doc.get("covered_from")
+    covered_from = min(doc["covered_from"], first_full) if continuous else first_full
+    _bmw_update(store, vins=vins, last_sync=now.isoformat(), covered_from=covered_from)
+    return {"sessions": len(sessions), "days_saved": len(docs), "covered_from": covered_from}
+
+
+def bmw_compare(store: Store) -> dict:
+    """BMW's own charging energy against Octopus's modelled EV usage, per day and per half-hour."""
+    doc = store.get("settings", BMW_DOC)
+    if not doc or not doc.get("covered_from"):
+        raise ValueError("No BMW data stored yet - run: python -m solarsim bmw-sync")
+    first = doc["covered_from"]
+    bmw_docs = [d for d in store.by_date("settings", first, "2100-01-01") if d.get("kind") == "bmw"]
+    cons = store.by_date("consumption", first, "2100-01-01")
+    ev = pd.Series({pd.Timestamp(s["start"]): s.get("ev", 0.0) for d in cons for s in d["slots"]}, dtype=float)
+    b = pd.Series({pd.Timestamp(s["start"]): s["kwh"] for d in bmw_docs for s in d["slots"]}, dtype=float)
+    idx = ev.index.union(b.index)
+    df = pd.DataFrame({"bmw": b.reindex(idx).fillna(0.0), "octopus": ev.reindex(idx).fillna(0.0)})
+    df = df[df.index.isin(ev.index)]  # only slots where Octopus data exists
+    df["date"] = df.index.tz_convert(LOCAL_TZ).strftime("%Y-%m-%d")
+    days = df.groupby("date")[["bmw", "octopus"]].sum().round(1)
+    days = days[(days["bmw"] > 0) | (days["octopus"] > 0)]
+    both = df[(df["bmw"] > 0.05) | (df["octopus"] > 0.05)]
+    return {"days": days.reset_index().to_dict(orient="records"), "bmw_kwh": round(float(df["bmw"].sum()), 1),
+            "octopus_kwh": round(float(df["octopus"].sum()), 1),
+            "slots_compared": len(both), "slots_within_half_kwh": int(((both["bmw"] - both["octopus"]).abs() <= 0.5).sum()),
+            "correlation": round(float(df["bmw"].corr(df["octopus"])), 3)}
+
+
 def _live_rows(env: dict) -> tuple[pd.Timestamp, list[dict], str | None]:
     """Completed half-hours from live smart meter telemetry for the last two days and today."""
     live_start = _window(0)[1] - pd.Timedelta(days=2)
@@ -190,7 +301,7 @@ def _attach_ev(env: dict, rows: list[dict], since: pd.Timestamp) -> None:
 
 
 def refresh_recent(store: Store) -> None:
-    """Bring the last two days and today up to date; silently keeps stored data if Octopus is unavailable."""
+    """Bring the last two days and today up to date; silently keeps stored data if Octopus or BMW is unavailable."""
     env = None
     try:
         env = _octopus_details(store)
@@ -200,6 +311,10 @@ def refresh_recent(store: Store) -> None:
         live_start, live, _ = _live_rows(env)
         _attach_ev(env, live, live_start)
         _store_rows(store, live)
+    try:
+        sync_bmw(store)
+    except (requests.RequestException, ValueError):
+        pass
 
 
 def fetch_consumption(store: Store, days: int) -> dict:
@@ -372,21 +487,33 @@ def _three_day_usage(store: Store, days: list, slots: pd.DatetimeIndex) -> tuple
 
 
 def forecast(store: Store, body: dict) -> dict:
-    """Two days ago, yesterday and today: solar against usage, run through each quote's battery."""
+    """The last HISTORY_DAYS days: solar against usage, run through each quote's battery."""
     inputs = _parse_quotes(body)
     base = inputs[0]
     refresh_recent(store)
     today = pd.Timestamp.now(tz=LOCAL_TZ).date()
-    days = [today + timedelta(days=i) for i in (-2, -1, 0)]
+    days = [today + timedelta(days=i) for i in range(1 - HISTORY_DAYS, 1)]
     start = pd.Timestamp(days[0]).tz_localize(LOCAL_TZ)
     end = pd.Timestamp(days[-1] + timedelta(days=1)).tz_localize(LOCAL_TZ)
     slots = pd.date_range(start, end, freq="30min", inclusive="left").tz_convert("UTC")
 
     usage, sources, actual_kwh, ev_usage = _three_day_usage(store, days, slots)
     faces = base.faces()
-    irradiance = weather.fetch_forecast_faces(base.tilt, [f for f, w in faces.items() if w])
+    irradiance = weather.fetch_forecast_faces(base.tilt, [f for f, w in faces.items() if w], past_days=HISTORY_DAYS - 1)
     solar_docs = [{"hourly": [{"end": t.isoformat(), **row} for t, row in irradiance.to_dict(orient="index").items()]}]
-    cons_docs = [{"slots": [{"start": t.isoformat(), "kwh": k, "ev": ev_usage[t]} for t, k in usage.items()]}]
+
+    # Days BMW has synced use its recorded charging; other days use Octopus's EV readings alone
+    bmw_doc = store.get("settings", BMW_DOC)
+    covered_from = (bmw_doc or {}).get("covered_from")
+    bmw_kwh = {pd.Timestamp(s["start"]): s["kwh"] for d in store.by_date("settings", days[0].isoformat(), (days[-1] + timedelta(days=1)).isoformat())
+               if d.get("kind") == "bmw" for s in d["slots"]} if covered_from else {}
+    bmw_days = [bool(covered_from) and d.isoformat() >= covered_from for d in days]
+    slot_dates = slots.tz_convert(LOCAL_TZ).strftime("%Y-%m-%d")
+    bmw_covered = pd.Series([bool(covered_from) and dt >= covered_from for dt in slot_dates], index=slots)
+    bmw_slot_kwh = pd.Series([bmw_kwh.get(t, 0.0) for t in slots], index=slots)
+    # The larger of the two is the car's load, because Octopus also sees any other EV
+    ev_load = pd.concat([ev_usage, bmw_slot_kwh.where(bmw_covered, 0.0)], axis=1).max(axis=1)
+    cons_docs = [{"slots": [{"start": t.isoformat(), "kwh": k, "ev": ev_load[t]} for t, k in usage.items()]}]
 
     tariff = Tariff(peak_p=base.peak_p, offpeak_p=base.offpeak_p, export_p=base.export_p)
     unit = build_frame(cons_docs, solar_docs, System(solar_kwp=1, performance_ratio=base.performance_ratio), tariff, faces)
@@ -403,25 +530,37 @@ def forecast(store: Store, body: dict) -> dict:
         scenarios = []
         for strat in STRATEGIES:
             r = dispatch(df, system, tariff, strat)
-            # Usage inside the off-peak window, plus actual EV usage outside it, is shown as battery/EV charging
-            load = r["load"].where(r["load"] > 0)
-            share = ((df["ev"].reindex(r.index).clip(upper=r["load"]) / load).fillna(0.0)).where(~r["offpeak"], 1.0)
-            r["chg_direct"] = r["direct"] * share
-            r["chg_discharge"] = r["discharge"] * share
-            r["chg_grid_house"] = (r["import"] - r["grid_charge"]) * share
+            # The car only charges from the grid: BMW's recorded charging, plus other EV charging Octopus saw. On days BMW
+            # hasn't synced, all usage inside the off-peak window is shown as "other" charging, as before
+            covered = bmw_covered.reindex(r.index)
+            house_grid = r["import"] - r["grid_charge"]
+            bmw_part = bmw_slot_kwh.reindex(r.index).where(covered, 0.0).clip(upper=r["ev_grid"])
+            window = ~covered & r["offpeak"]
+            r["bmw_direct"] = 0.0
+            r["bmw_discharge"] = 0.0
+            r["bmw_grid_house"] = bmw_part
+            r["oev_direct"] = r["direct"].where(window, 0.0)
+            r["oev_discharge"] = r["discharge"].where(window, 0.0)
+            r["oev_grid_house"] = (r["ev_grid"] - bmw_part).where(~window, house_grid)
             local = r.index.tz_convert(LOCAL_TZ)
             totals = r[list(FORECAST_TOTALS)].groupby(local.strftime("%Y-%m-%d")).sum().round(2)
             flows = r[list(FORECAST_FLOWS)] / SLOT_H
             flows["import"] -= flows["grid_charge"]
             scenarios.append({
                 "scenario": strat.name,
+                "history": [{"date": d.isoformat(), **totals.loc[d.isoformat()].to_dict()}
+                            for d in days if d.isoformat() in totals.index],
                 "days": [{"date": d.isoformat(), **totals.loc[d.isoformat()].to_dict()}
-                         for d in days if d.isoformat() in totals.index],
+                         for d in days[-3:] if d.isoformat() in totals.index],
                 "slots": [{"t": lt.strftime("%Y-%m-%d %H:%M"), "offpeak": bool(op),
                            **{k: round(float(row[k]), 3) for k in FORECAST_FLOWS}, "soc": round(float(soc), 3)}
-                          for lt, op, soc, (_, row) in zip(local, r["offpeak"], r["soc"], flows.iterrows())],
+                          for lt, op, soc, (_, row) in zip(local, r["offpeak"], r["soc"], flows.iterrows())
+                          if lt.date() >= days[-3]],
             })
         quotes.append({"name": inp.name, "battery_kwh": inp.battery_kwh, "scenarios": scenarios})
 
-    return {"days": [{"date": d.isoformat(), "label": lbl, "usage": src, "actual_kwh": round(act, 2)}
-                     for d, lbl, src, act in zip(days, FORECAST_LABELS, sources, actual_kwh)], "quotes": quotes}
+    names = {today: "Today", today - timedelta(days=1): "Yesterday", today - timedelta(days=2): "Two days ago"}
+    history = [{"date": d.isoformat(), "label": names.get(d, f"{d:%a} {d.day} {d:%b}"), "usage": src,
+                "actual_kwh": round(act, 2), "charging": "bmw" if from_bmw_day else "estimated"}
+               for d, src, act, from_bmw_day in zip(days, sources, actual_kwh, bmw_days)]
+    return {"days": history[-3:], "history": history, "quotes": quotes}

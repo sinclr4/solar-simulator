@@ -29,10 +29,11 @@ def fetch_tilted_irradiance(start: date, end: date, tilt: float, azimuth: float,
                                             "tilt": tilt, "azimuth": azimuth})
 
 
-def fetch_forecast_faces(tilt: float, faces: list[str], lat: float = YORK[0], lon: float = YORK[1]) -> pd.DataFrame:
-    """Hourly irradiance for the two days before today and today, for the given roof faces."""
+def fetch_forecast_faces(tilt: float, faces: list[str], lat: float = YORK[0], lon: float = YORK[1],
+                         past_days: int = 2) -> pd.DataFrame:
+    """Hourly irradiance for the given number of days before today and today itself, for the given roof faces."""
     return pd.DataFrame({f: _irradiance_series(FORECAST_URL, {"latitude": lat, "longitude": lon, "tilt": tilt,
-                                                              "azimuth": FACE_AZIMUTH[f], "past_days": 2,
+                                                              "azimuth": FACE_AZIMUTH[f], "past_days": past_days,
                                                               "forecast_days": 1})
                          for f in faces}).dropna()
 

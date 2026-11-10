@@ -79,6 +79,9 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
     ev_min, ev_max = strat.ev_min_kw * SLOT_H, strat.ev_max_kw * SLOT_H
 
     df = df.assign(cheap=df["cheap"] if "cheap" in df else df["offpeak"], ev_kwh=df["ev"] if "ev" in df else 0.0)
+    # The car is charged from the grid only, so solar and the battery serve just the rest of the house
+    df["ev_kwh"] = df["ev_kwh"].clip(upper=df["load"])
+    df["house"] = df["load"] - df["ev_kwh"]
     has_ev = df["ev_kwh"].sum() > 0
     off, peak = df[df.offpeak], df[~df.cheap]
     house_base = off["load"].quantile(0.2)
@@ -86,7 +89,7 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
     ev_budget = (cheap_df["ev_kwh"].groupby(cheap_df["key"]).sum() if has_ev
                  else (off["load"] - house_base).clip(lower=0).groupby(off["key"]).sum()).to_dict()
 
-    net = peak["load"] - peak["pv"]
+    net = peak["house"] - peak["pv"]
     need = (net.clip(lower=0).groupby(peak["key"]).sum()
             - (-net).clip(lower=0).groupby(peak["key"]).sum() * system.round_trip_eff).clip(lower=0)
     keys = sorted(df["key"].unique())
@@ -100,9 +103,9 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
     ev_div: dict = {}
     ev_credit: dict = {}
     out = []
-    for t, load0, pv, offpk, key, month, cheap, ev_slot in df[
-            ["load", "pv", "offpeak", "key", "month", "cheap", "ev_kwh"]].itertuples():
-        load = load0
+    for t, load0, pv, offpk, key, month, cheap, ev_slot, house in df[
+            ["load", "pv", "offpeak", "key", "month", "cheap", "ev_kwh", "house"]].itertuples():
+        load = house
         if cheap and ev_credit.get(key, 0.0) > 0:
             cut = min(ev_credit[key], ev_slot if has_ev else max(0.0, load - house_base))
             load -= cut
@@ -153,11 +156,11 @@ def dispatch(df: pd.DataFrame, system: System, tariff: Tariff, strat: Strategy) 
             soc += grid_chg * eta
 
         out.append((t, load0, pv, offpk, cheap, month, direct, solar_from_batt, ev, export, curtailed,
-                    deficit + grid_chg, grid_chg, c, dis, soc))
+                    deficit + grid_chg + ev_slot, grid_chg, c, dis, soc, ev_slot))
 
     r = pd.DataFrame(out, columns=["t", "load", "pv", "offpeak", "cheap", "month", "direct", "solar_batt", "ev_solar",
                                    "export", "curtailed", "import", "grid_charge", "solar_charge",
-                                   "discharge", "soc"]).set_index("t")
+                                   "discharge", "soc", "ev_grid"]).set_index("t")
     rate = r["cheap"].map({True: tariff.offpeak_p, False: tariff.peak_p}) / 100
     r["cost_before"] = r["load"] * rate
     r["cost_after"] = r["import"] * rate - r["export"] * tariff.export_p / 100

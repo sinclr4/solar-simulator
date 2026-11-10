@@ -66,7 +66,7 @@
       <dt>Performance ratio</dt><dd>A multiplier for real-world system losses such as inverter, wiring, temperature and shading. 0.85 represents 85% of the modelled plane-of-array irradiation reaching usable AC generation.</dd>
       <dt>Typical year</dt><dd>When checked, scales the measured solar profile to PVGIS's long-term average yield for York, the selected orientation and pitch. It adjusts the solar amount, not the half-hourly shape.</dd>
       <dt>Peak rate</dt><dd>Electricity import price outside 23:30–05:30, in pence per kWh.</dd>
-      <dt>Off-peak rate</dt><dd>Import price from 23:30 to 05:30, in pence per kWh. In the model, electric-car charging remains on this cheap grid rate unless summer surplus solar is assigned to EV charging.</dd>
+      <dt>Off-peak rate</dt><dd>Import price from 23:30 to 05:30, in pence per kWh. In the model, electric-car charging is always taken from the grid, never from solar or the battery, and charging Octopus recorded outside this window is also billed at this rate.</dd>
       <dt>Export rate</dt><dd>Payment received for each exported kWh, in pence. The model subtracts export earnings from the estimated bill.</dd>
       <dt>Install date</dt><dd>The date used to turn a payback duration into a calendar month and year. If blank, today is used.</dd>
       <dt>Energy price rise</dt><dd>The assumed yearly increase in energy prices. The app shows payback with flat prices and with this selected increase.</dd>

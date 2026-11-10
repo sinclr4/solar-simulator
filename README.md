@@ -12,7 +12,6 @@ For every quote, it runs three operating strategies:
 | --- | --- | --- |
 | Solar + battery (charged from solar only) | Solar only | Battery, then export |
 | Solar + battery + off-peak grid charging | Solar, plus cheap off-peak grid electricity | Battery, then export |
-| Grid charging + summer surplus to EV | Solar, plus cheap off-peak grid electricity | Battery, then the electric car (April–September), then export |
 | Full off-peak charge, sell surplus at export rate | Solar, plus a full off-peak grid charge | Battery, then export. From 21:30, any battery energy beyond what the rest of that evening needs is also sold at the export rate, just before off-peak starts |
 
 The last option only pays when the export rate, after the battery's round-trip loss, beats the off-peak rate. With 6.6p off-peak, 12p export and 89% efficiency, each kWh sold earns about 10.7p for 6.6p of electricity. That is a gain of roughly 4p, before counting extra battery wear from cycling daily.
@@ -44,17 +43,16 @@ Both half-hours in an hour use that hour's average irradiance. If **Typical year
 
 Every half-hour is processed in this order:
 
-1. **Direct use:** solar supplies the house first.
+1. **Direct use:** solar supplies the house first. The car's charging is excluded: it always comes from the grid, never from solar or the battery.
 2. **Battery charging from solar:** surplus solar charges the battery. This is limited by battery power (kW), free capacity and charging losses. Round-trip efficiency is split equally between charging and discharging (√efficiency each way).
-3. **EV diversion** (summer-EV strategy only, April–September, peak hours): remaining surplus of at least 1.4 kW goes to the car, up to 7 kW. The car can only take as much as it would otherwise have charged overnight. Each kWh diverted is removed from that night's off-peak import.
-4. **Export:** remaining surplus is exported up to the export limit. Anything above the limit is counted as **curtailed**.
-5. **Battery discharge:** during peak hours only, the battery covers any remaining demand, limited by its power and stored energy. It never discharges in the off-peak window, because grid electricity is cheap then. It never exports to the grid.
-6. **Grid import:** any demand still unmet is imported.
-7. **Off-peak grid charging** (grid-charging strategies only): during 23:30–05:30, the battery is topped up from the grid. It charges only to the level needed for the following day: the peak-time shortfall after solar, less surplus solar that could refill the battery, capped at battery capacity.
+3. **Export:** remaining surplus is exported up to the export limit. Anything above the limit is counted as **curtailed**.
+4. **Battery discharge:** during peak hours only, the battery covers any remaining demand, limited by its power and stored energy. It never discharges in the off-peak window, because grid electricity is cheap then. It never exports to the grid.
+5. **Grid import:** any demand still unmet, plus all the car's charging, is imported.
+6. **Off-peak grid charging** (grid-charging strategies only): during 23:30–05:30, the battery is topped up from the grid. It charges only to the level needed for the following day: the peak-time shortfall after solar, less surplus solar that could refill the battery, capped at battery capacity.
 
 The simulator tracks how much stored energy came from solar. This means **daytime usage shifted to solar** counts only solar used directly or via the battery, and excludes grid-charged energy.
 
-**Estimating EV charging:** the baseline overnight house load is the 20th percentile of off-peak half-hour usage. Off-peak usage above that baseline is treated as EV (or other flexible) charging. Summed per night, this sets how much solar the car could have absorbed that day.
+**EV charging:** the car's charging in each half-hour comes from Octopus's modelled EV readings. A half-hour with EV charging outside 23:30–05:30 is treated as an Intelligent Octopus smart-charge slot and billed at the off-peak rate, and the battery does not discharge in it.
 
 ### 4. Bills and savings
 
