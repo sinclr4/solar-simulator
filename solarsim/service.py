@@ -534,7 +534,10 @@ def forecast(store: Store, body: dict) -> dict:
             # hasn't synced, all usage inside the off-peak window is shown as "other" charging, as before
             covered = bmw_covered.reindex(r.index)
             house_grid = r["import"] - r["grid_charge"]
-            bmw_part = bmw_slot_kwh.reindex(r.index).where(covered, 0.0).clip(upper=r["ev_grid"])
+            # Octopus measures at the meter, so it reads a little above what the car logs; that gap is the BMW's own
+            # charging loss, not a second car. Slots next to a BMW charge count too, as the two sources drift by a slot
+            bmw_active = (bmw_slot_kwh.reindex(r.index) > 0).rolling(3, center=True, min_periods=1).max().astype(bool)
+            bmw_part = r["ev_grid"].where(covered & bmw_active, 0.0)
             window = ~covered & r["offpeak"]
             r["bmw_direct"] = 0.0
             r["bmw_discharge"] = 0.0

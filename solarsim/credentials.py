@@ -32,7 +32,7 @@ def decrypt(token: str) -> str:
     try:
         return Fernet(_key()).decrypt(token.encode()).decode()
     except InvalidToken:
-        raise ValueError("Your saved Octopus details can no longer be read - please enter them again") from None
+        raise ValueError("Saved credentials can no longer be read (wrong CREDENTIALS_KEY?) - please enter them again") from None
 
 
 API_KEY_RE = re.compile(r"^sk_(live|test)_[A-Za-z0-9]{10,100}$")
