@@ -769,9 +769,13 @@ function drawSankey(d) {
       txt(n.x + 12, n.y + n.h - 10, line, line.length > 16 ? 12 : 14, 600);
       if (n.logo) mark(n, n.hideName ? n.x + 24 : n.x + BW - 24, n.y + 20, 28);
     } else if (n.h >= 20) {
-      const ls = n.logo ? Math.min(n.h - 2, 18) : 0;
+      const ls = n.logo ? Math.min(n.h - 2, 18) : 0, off = n.logo ? ls + 6 : 0;
       if (n.logo) mark(n, n.x + 12 + ls / 2, n.y + n.h / 2, ls);
-      txt(n.x + 12 + (n.logo ? ls + 6 : 0), n.y + n.h / 2 + 5, `${label} ${value}${n.name.length + value.length > 12 ? "" : " kWh"}`.trimStart(), 13, 600);
+      // Show the cost if it fits (dropping the name if need be), otherwise the unit, otherwise just the number
+      const room = Math.floor((BW - 20 - off) / 6.8), base = `${label} ${value}`.trim();
+      const options = [n.costText && `${base} \u00b7 ${n.costText}`, n.costText && `${n.icon} ${value} \u00b7 ${n.costText}`.trim(),
+        `${base} kWh`, base].filter(Boolean);
+      txt(n.x + 12 + off, n.y + n.h / 2 + 4, options.find(o => o.length <= room) || base, 12, 600);
     }
   };
   L.forEach(n => block(n, total(L)));
