@@ -8,7 +8,9 @@ from dotenv import load_dotenv
 import base64
 import json
 import re
+from urllib.parse import urlparse
 
+import requests
 from flask import Flask, abort, g, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
@@ -157,12 +159,21 @@ def bad_request(e):
     return jsonify(error=str(e)), 400
 
 
+@app.errorhandler(requests.RequestException)
+def upstream_failed(e):
+    logging.exception("Upstream request failed")
+    resp = getattr(e, "response", None)
+    host = urlparse(getattr(resp, "url", None) or getattr(getattr(e, "request", None), "url", None) or "").hostname
+    outcome = f"returned {resp.status_code}" if resp is not None else "could not be reached"
+    return jsonify(error=f"{host or 'An external service'} {outcome}"), 502
+
+
 @app.errorhandler(Exception)
 def server_error(e):
     if isinstance(e, HTTPException):
         return e
     logging.exception("Request failed")
-    return jsonify(error="Something went wrong - see the server log for details"), 500
+    return jsonify(error=f"Something went wrong ({type(e).__name__}) - see the server log for details"), 500
 
 
 def main() -> None:
