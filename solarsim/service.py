@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from dataclasses import asdict, dataclass, fields
@@ -209,6 +210,8 @@ def _bmw_day_docs(sessions: list[dict], first_full_date: str) -> list[dict]:
     infos: dict[str, list] = {}
     seen = set()
     for s in sessions:
+        if s.get("startTime") is None:
+            continue
         if (s["vin"], s["startTime"]) in seen:
             continue
         seen.add((s["vin"], s["startTime"]))
@@ -314,8 +317,8 @@ def refresh_recent(store: Store) -> None:
         _store_rows(store, live)
     try:
         sync_bmw(store)
-    except (requests.RequestException, ValueError):
-        pass
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        logging.exception("BMW sync failed")
 
 
 def fetch_consumption(store: Store, days: int) -> dict:

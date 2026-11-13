@@ -86,7 +86,9 @@ def mapped_vins(token: str) -> list[str]:
 
 def session_slot_kwh(session: dict) -> dict[int, float]:
     """Grid energy (kWh) per half-hour for one session, keyed by the slot's UTC epoch start."""
-    blocks = [(b["startTime"], b["endTime"], b["averagePowerGridKw"] / 3600) for b in session.get("chargingBlocks") or []]
+    # A session still in progress can have blocks with no end time or power yet
+    blocks = [(b["startTime"], b["endTime"], b["averagePowerGridKw"] / 3600) for b in session.get("chargingBlocks") or []
+              if b.get("startTime") is not None and b.get("endTime") is not None and b.get("averagePowerGridKw") is not None]
     kwh, start, end = session.get("energyConsumedFromPowerGridKwh") or 0.0, session.get("startTime"), session.get("endTime")
     if not blocks and kwh > 0 and start and end and end > start:
         blocks = [(start, end, kwh / (end - start))]  # no power readings, so assume steady charging
