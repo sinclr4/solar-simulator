@@ -278,6 +278,26 @@ def bmw_compare(store: Store) -> dict:
             "correlation": round(float(df["bmw"].corr(df["octopus"])), 3)}
 
 
+def ev_sessions(store: Store, days: int = 14) -> list[dict]:
+    """Octopus's per-vehicle charging sessions, each compared with the stored meter data for the same period."""
+    env = _octopus_details(store)
+    if not env:
+        raise ValueError("Connect your Octopus account first")
+    after = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days)).isoformat()
+    sessions = octopus.fetch_charging_sessions(env["api_key"], env["account"], after)
+    lo, hi = min((s["start"] for s in sessions), default=after)[:10], (pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    slots = {pd.Timestamp(x["start"]): x for d in store.by_date("consumption", lo, hi) for x in d["slots"]}
+    out = []
+    for sess in sorted(sessions, key=lambda x: x["start"]):
+        a, b = pd.Timestamp(sess["start"]), pd.Timestamp(sess["end"])
+        inside = [(t, x) for t, x in sorted(slots.items()) if a <= t < b]
+        out.append({**sess, "slots": len(inside), "meter_kwh": round(sum(x["kwh"] for _, x in inside), 2),
+                    "octopus_ev_kwh": round(sum(x.get("ev", 0.0) for _, x in inside), 2),
+                    "ev_slots": [(t.tz_convert(LOCAL_TZ).strftime("%a %H:%M"), x["kwh"], x.get("ev", 0.0))
+                                 for t, x in inside if x["kwh"] >= 1.0 or x.get("ev", 0.0) > 0]})
+    return out
+
+
 def _live_rows(env: dict) -> tuple[pd.Timestamp, list[dict], str | None]:
     """Completed half-hours from live smart meter telemetry for the last two days and today."""
     live_start = _window(0)[1] - pd.Timedelta(days=2)
@@ -304,6 +324,61 @@ def _attach_ev(env: dict, rows: list[dict], since: pd.Timestamp) -> None:
             r["ev"] = round(min(ev.get(t, 0.0), r["consumption"]), 3)
 
 
+EV_SLOT_MAX_KWH = 3.7  # a 7.4 kW home charger over half an hour
+EV_SESSION_LOOKBACK_DAYS = 45
+
+
+def credit_sessions(rows: list[dict], sessions: list[dict], typical: dict[str, float]) -> None:
+    """Credit each Octopus-reported charging session to the half-hours that carried it, by setting row["ev"].
+
+    Octopus's modelled EV readings miss much of the charging, so inside each session the energy Octopus says was added is
+    placed on runs of consecutive slots whose usage exceeds the typical level for that time of day, at most one charger's
+    worth per slot. The latest runs are filled first, because a session ends when charging finishes.
+    """
+    step = pd.Timedelta(minutes=30)
+    for s in sessions:
+        a, b = pd.Timestamp(s["start"]), pd.Timestamp(s["end"])
+        inside = sorted(((pd.Timestamp(r["interval_start"]), r) for r in rows), key=lambda x: x[0])
+        inside = [(t, r) for t, r in inside if a <= t < b]
+        need = s["kwh"] - sum(r.get("ev", 0.0) for _, r in inside)
+        runs: list[list[tuple[float, dict]]] = []
+        last = None
+        for t, r in inside:
+            excess = r["consumption"] - typical.get(t.tz_convert(LOCAL_TZ).strftime("%H:%M"), 0.0)
+            if r.get("ev") or excess < 0.3:
+                last = None
+                continue
+            if last is None or t - last > step:
+                runs.append([])
+            runs[-1].append((excess, r))
+            last = t
+        for excess, r in (x for run in reversed(runs) for x in reversed(run)):
+            give = min(excess, EV_SLOT_MAX_KWH, r["consumption"], need)
+            if give < 0.2:
+                break
+            r["ev"] = round(give, 3)
+            need -= give
+
+
+def _attach_sessions(store: Store, env: dict, rows: list[dict], since: pd.Timestamp) -> None:
+    """Attribute usage to the vehicle Octopus says was charging; rows are left alone if sessions are unavailable."""
+    after = max(since - pd.Timedelta(days=1), pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=EV_SESSION_LOOKBACK_DAYS))
+    try:
+        sessions = octopus.fetch_charging_sessions(env["api_key"], env["account"], after.isoformat())
+    except (requests.RequestException, ValueError):
+        return
+    if not sessions:
+        return
+    first = min(pd.Timestamp(r["interval_start"]) for r in rows).tz_convert(LOCAL_TZ).date()
+    docs = store.by_date("consumption", (first - timedelta(days=TYPICAL_DAYS)).isoformat(), first.isoformat())
+    slots = [s for d in docs for s in d["slots"]]
+    if not slots:
+        return
+    hm = pd.DatetimeIndex([pd.Timestamp(s["start"]) for s in slots]).tz_convert(LOCAL_TZ).strftime("%H:%M")
+    typical = pd.Series([s["kwh"] for s in slots]).groupby(hm).quantile(0.2).to_dict()
+    credit_sessions(rows, sessions, typical)
+
+
 def refresh_recent(store: Store) -> None:
     """Bring the last two days and today up to date; silently keeps stored data if Octopus or BMW is unavailable."""
     env = None
@@ -314,6 +389,7 @@ def refresh_recent(store: Store) -> None:
     if env:
         live_start, live, _ = _live_rows(env)
         _attach_ev(env, live, live_start)
+        _attach_sessions(store, env, live, live_start)
         _store_rows(store, live)
     try:
         sync_bmw(store)
@@ -335,6 +411,7 @@ def fetch_consumption(store: Store, days: int) -> dict:
     if live:
         rows = [r for r in rows if pd.Timestamp(r["interval_start"]) < live_start] + live
     _attach_ev(env, rows, start)
+    _attach_sessions(store, env, rows, start)
     return {"fetched_days": _store_rows(store, rows), "live_slots": len(live), "live_error": live_error,
             "ev_slots": sum(1 for r in rows if r.get("ev", 0) > 0), **data_status(store)}
 

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from dataclasses import fields
 from datetime import datetime, timezone
 
+import requests
 from dotenv import load_dotenv
 
-from . import bmw, service
+from . import bmw, octopus, service
 from .store import Database
 
 
@@ -27,6 +29,9 @@ def main() -> None:
     b.add_argument("--client-id", help="CarData client ID from the My BMW portal (or set BMW_CLIENT_ID)")
     bs = sub.add_parser("bmw-sessions", help="List recent BMW charging sessions")
     bs.add_argument("--days", type=int, default=30)
+    sub.add_parser("octopus-dispatches", help="Show your Intelligent Octopus devices and charging dispatches")
+    es = sub.add_parser("ev-sessions", help="Compare Octopus's per-vehicle charging sessions with your meter data")
+    es.add_argument("--days", type=int, default=14)
     sub.add_parser("bmw-sync", help="Save BMW charging sessions into Cosmos DB (BMW only keeps ~2 months)")
     sub.add_parser("bmw-compare", help="Compare BMW charging energy with Octopus's EV readings")
     s = sub.add_parser("simulate", help="Run scenarios and payback")
@@ -57,6 +62,26 @@ def main() -> None:
         print("\nWaiting for you to approve...")
         service.bmw_connect(store, client_id, bmw.wait_for_tokens(client_id, flow)["refresh_token"])
         print("Connected. Try: python -m solarsim bmw-sessions")
+        return
+    if args.cmd == "octopus-dispatches":
+        env = service._octopus_details(store)
+        if not env:
+            raise SystemExit("Octopus isn't connected - save your account number and API key in the web app first")
+        for name, call in (("devices", octopus.fetch_devices), ("completed dispatches", octopus.fetch_completed_dispatches),
+                           ("charging sessions", octopus.fetch_charging_sessions),
+                           ("planned dispatches", octopus.fetch_planned_dispatches)):
+            print(f"\n== {name} ==")
+            try:
+                print(json.dumps(call(env["api_key"], env["account"]), indent=2))
+            except (requests.RequestException, ValueError) as e:
+                print(f"failed: {e}")
+        return
+    if args.cmd == "ev-sessions":
+        for s in service.ev_sessions(store, args.days):
+            print(f"\n{s['vehicle']}: {s['start'][:16]} -> {s['end'][:16]}  Octopus says {s['kwh']} kWh added; "
+                  f"meter {s['meter_kwh']} kWh over {s['slots']} slots, Octopus modelled EV {s['octopus_ev_kwh']} kWh")
+            for label, kwh, ev in s["ev_slots"]:
+                print(f"    {label}  meter {kwh:.2f} kWh  modelled EV {ev:.2f} kWh")
         return
     if args.cmd == "bmw-sync":
         print(service.sync_bmw(store, force=True))

@@ -54,6 +54,8 @@ The simulator tracks how much stored energy came from solar. This means **daytim
 
 **EV charging:** the car's charging in each half-hour comes from Octopus's modelled EV readings. A half-hour with EV charging outside 23:30–05:30 is treated as an Intelligent Octopus smart-charge slot and billed at the off-peak rate, and the battery does not discharge in it.
 
+Octopus's modelled readings miss a lot of charging, so the app also reads each vehicle's charging sessions from Octopus's SmartFlex GraphQL API (kWh added and plug-in start and end). Inside a session it credits the reported energy to runs of consecutive half-hours whose usage is above your typical level for that time of day, up to 3.7 kWh per half-hour, filling the latest runs first. This is an estimate, because Octopus doesn't say which half-hours the car drew from. It applies to recent data (the last 45 days) when usage is refreshed or fetched. Run `python -m solarsim ev-sessions` to compare each session with your meter readings, or `python -m solarsim octopus-dispatches` to see the raw devices, sessions and dispatches.
+
 ### 4. Bills and savings
 
 ```text

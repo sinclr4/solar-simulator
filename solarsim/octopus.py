@@ -53,10 +53,13 @@ _TELEMETRY_QUERY = """query($deviceId: String!, $start: DateTime, $end: DateTime
 def _graphql(query: str, variables: dict, token: str | None = None) -> dict:
     r = requests.post(GRAPHQL_URL, json={"query": query, "variables": variables},
                       headers={"Authorization": token} if token else None, timeout=60)
-    r.raise_for_status()
-    body = r.json()
+    try:
+        body = r.json()
+    except ValueError:
+        body = {}
     if body.get("errors"):
         raise ValueError(body["errors"][0].get("message", "Octopus GraphQL request failed"))
+    r.raise_for_status()
     return body["data"]
 
 
@@ -91,6 +94,48 @@ def fetch_ev_readings(api_key: str, account: str, start: str, end: str) -> dict[
                 break
             after = page["pageInfo"]["endCursor"]
     return readings
+
+
+_DEVICES_LIST_QUERY = "query($a: String!) { devices(accountNumber: $a) { id name deviceType integrationDeviceId } }"
+_COMPLETED_QUERY = "query($a: String!) { completedDispatches(accountNumber: $a) { start end delta meta { location } } }"
+_FLEX_PLANNED_QUERY = "query($d: String!) { flexPlannedDispatches(deviceId: $d) { start end energyAddedKwh type } }"
+
+
+def _token(api_key: str) -> str:
+    return _graphql(_TOKEN_QUERY, {"key": api_key})["obtainKrakenToken"]["token"]
+
+
+def fetch_devices(api_key: str, account: str) -> list[dict]:
+    """SmartFlex devices (chargers, vehicles, batteries) registered on the account."""
+    return _graphql(_DEVICES_LIST_QUERY, {"a": account}, _token(api_key))["devices"] or []
+
+
+def fetch_completed_dispatches(api_key: str, account: str) -> list[dict]:
+    """Intelligent Octopus slots in which the car was actually dispatched; Octopus only returns about the last 12 hours."""
+    return _graphql(_COMPLETED_QUERY, {"a": account}, _token(api_key))["completedDispatches"] or []
+
+
+def fetch_planned_dispatches(api_key: str, account: str) -> dict[str, list[dict]]:
+    """Upcoming dispatches keyed by device id. Octopus limits this call to 5 a minute."""
+    token = _token(api_key)
+    devices = _graphql(_DEVICES_LIST_QUERY, {"a": account}, token)["devices"] or []
+    return {d["id"]: _graphql(_FLEX_PLANNED_QUERY, {"d": d["id"]}, token)["flexPlannedDispatches"] or []
+            for d in devices}
+
+
+_SESSIONS_QUERY = """query($a: String!, $after: DateTime) {
+  devices(accountNumber: $a) { id name deviceType
+    ... on SmartFlexVehicle { chargingSessions(after: $after, first: 100) { edges { node {
+      start end ... on SmartFlexChargingSession { stateOfChargeChange stateOfChargeFinal energyAdded { value unit }
+        dispatches { start end energyAddedKwh type } } } } } } } }"""
+
+
+def fetch_charging_sessions(api_key: str, account: str, after: str) -> list[dict]:
+    """Plugged-in charging sessions per vehicle from SmartFlex: vehicle name, start, end and kWh added."""
+    devices = _graphql(_SESSIONS_QUERY, {"a": account, "after": after}, _token(api_key))["devices"] or []
+    return [{"vehicle": d["name"], "device_id": d["id"], "start": n["start"], "end": n["end"],
+             "kwh": float((n.get("energyAdded") or {}).get("value") or 0)}
+            for d in devices for e in (d.get("chargingSessions") or {}).get("edges", []) for n in [e["node"]]]
 
 
 def fetch_live_consumption(api_key: str, account: str, mpan: str, start: str, end: str) -> list[dict]:
