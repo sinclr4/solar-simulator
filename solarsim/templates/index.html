@@ -333,7 +333,11 @@ async function api(path, body, method) {
   return data;
 }
 
-loadSavedList();
+// Start from the first saved quote, unless the starter card has already been edited
+loadSavedList().then(() => {
+  const only = quotesEl.firstElementChild;
+  if (savedQuotes.length && quotesEl.children.length === 1 && only._pristine) document.getElementById("loadQuote").click();
+});
 
 function showOctopus(o) {
   document.getElementById("octopusSetup").classList.toggle("hidden", o.connected);
